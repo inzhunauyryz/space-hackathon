@@ -2,19 +2,17 @@ import pandas as pd
 
 def parse_telemetry_line(line):
     """
-    Парсит одну строку телеметрии по спецификации хакатона:
-    Преамбула; Время; АКБ; СД1-4; AX,AY,AZ; GX,GY,GZ; MX,MY,MZ; Маховик
+    Парсит строку телеметрии по спецификации хакатона.
     """
     if not isinstance(line, str):
         line = str(line)
     
     parts = line.strip().split(';')
     
-    # Проверка целостности пакета (минимум 17 полей по ТЗ)
     if len(parts) < 17:
         return {
             "status": "CORRUPTED",
-            "error": "Неполный пакет (повреждение преамбулы/постамбулы)",
+            "error": "Неполный пакет",
             "raw": line
         }
     
@@ -23,41 +21,39 @@ def parse_telemetry_line(line):
         time_ms = int(parts[1])
         
         # Формулы пересчета по ТЗ
-        battery_v = int(parts[2]) / 1000.0  мВ в В
-        light = [int(p) for p in parts[3:7]]  # СД1-СД4
+        battery_v = int(parts[2]) / 1000.0  
+        light = [int(p) for p in parts[3:7]]  
         
         accel = [
-            int(parts[7]) / 16384.0,  # AX (±2g)
-            int(parts[8]) / 16384.0,  # AY
-            int(parts[9]) / 16384.0   # AZ
+            int(parts[7]) / 16384.0,  
+            int(parts[8]) / 16384.0,  
+            int(parts[9]) / 16384.0   
         ]
         
         gyro = [
-            int(parts[10]) / 131.072, # GX (±250°/с)
-            int(parts[11]) / 131.072, # GY
-            int(parts[12]) / 131.072  # GZ
+            int(parts[10]) / 131.072, 
+            int(parts[11]) / 131.072, 
+            int(parts[12]) / 131.072  
         ]
         
         mag = [
-            int(parts[13]) / 1711.6,  # MX (±16 Гс)
-            int(parts[14]) / 1711.6,  # MY
-            int(parts[15]) / 1711.6   # MZ
+            int(parts[13]) / 1711.6,  
+            int(parts[14]) / 1711.6,  
+            int(parts[15]) / 1711.6   
         ]
         
-        flywheel = int(parts[16])       # Маховик
+        flywheel = int(parts[16])       
         
-        # Детекция аномалий и сбоев датчиков
         status = "NORMAL"
         warnings = []
         
         if battery_v < 3.3 or battery_v > 4.2:
             status = "WARNING"
-            warnings.warn(f"Критическое напряжение АКБ: {battery_v}В")
+            warnings.append(f"Критическое напряжение АКБ: {battery_v}В")
             
         if abs(accel[0]) > 2.0 or abs(accel[1]) > 2.0 or abs(accel[2]) > 2.0:
-        # Превышение диапазона ускорения — признак сбоя датчика
             status = "FAULT"
-            warnings.append("Превышение пределов ускорения (сбой датчика)")
+            warnings.append("Превышение пределов ускорения")
 
         return {
             "status": status,
@@ -80,10 +76,9 @@ def parse_telemetry_line(line):
         }
 
 def load_local_dataset(filename):
-    """Загружает CSV-датасет из локальной папки data/ в репозитории."""
     path = f"data/{filename}"
     try:
         df = pd.read_csv(path)
         return df
-    except Exception as e:
+    except Exception:
         return None
