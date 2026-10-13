@@ -26,7 +26,6 @@ if df is not None and not df.empty:
     # Слайдер кадров телеметрии
     frame_idx = st.slider("Выбор кадра телеметрии", 0, min(len(df)-1, 10000), 0)
     
-    # Получаем строку (предполагаем формат, где вся строка пакета находится в первой колонке)
     raw_row = str(df.iloc[frame_idx].values[0])
     parsed = parse_telemetry_line(raw_row)
     
@@ -43,7 +42,7 @@ if df is not None and not df.empty:
         st.metric("Ускорение Z", f"{accel[2]:.2f} g")
         
     if parsed.get("warnings"):
-        st.warning(f"⚠️ Предупреждения системы: {', '.join(parsed['warnings'])}")
+        st.warning(f"⚠️ Предупреждения: {', '.join(parsed['warnings'])}")
         
     st.markdown("---")
     
@@ -62,10 +61,13 @@ if df is not None and not df.empty:
             
     with tab2:
         st.subheader("Датчики света (СД1 - СД4)")
-        st.bar_chart(parsed.get("light", [0,0,0,0]))
+        light_vals = parsed.get("light", [0, 0, 0, 0])
+        # Создаем правильный датафрейм с подписями для стабильной отрисовки
+        chart_df = pd.DataFrame({"Уровень": light_vals}, index=["СД1", "СД2", "СД3", "СД4"])
+        st.bar_chart(chart_df)
         
     with tab3:
-        st.code(parsed.get("raw"))
+        st.code(str(parsed.get("raw", "")))
         st.json(parsed)
 else:
     st.error("Не удалось загрузить датасет из папки data/.")
