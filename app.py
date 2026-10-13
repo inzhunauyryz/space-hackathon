@@ -8,7 +8,6 @@ st.title("🛰️ Центр Управления Полётами КА «Инт
 st.markdown("**Профессиональный комплекс мониторинга телеметрии**")
 st.markdown("---")
 
-# Выбор датасета из официальной папки data/
 dataset_options = {
     "01_normal_flight.csv (Штатный полет)": "01_normal_flight.csv",
     "02_sensor_faults.csv (Сбои датчиков)": "02_sensor_faults.csv",
@@ -23,13 +22,11 @@ df = load_local_dataset(filename)
 if df is not None and not df.empty:
     st.sidebar.success(f"Загружено пакетов: {len(df)}")
     
-    # Слайдер кадров телеметрии
     frame_idx = st.slider("Выбор кадра телеметрии", 0, min(len(df)-1, 10000), 0)
     
     raw_row = str(df.iloc[frame_idx].values[0])
     parsed = parse_telemetry_line(raw_row)
     
-    # Верхние метрики
     col1, col2, col3, col4 = st.columns(4)
     with col1:
         st.metric("Статус пакета", parsed.get("status", "UNKNOWN"))
@@ -62,7 +59,6 @@ if df is not None and not df.empty:
     with tab2:
         st.subheader("Датчики света (СД1 - СД4)")
         light_vals = parsed.get("light", [0, 0, 0, 0])
-        # Создаем правильный датафрейм с подписями для стабильной отрисовки
         chart_df = pd.DataFrame({"Уровень": light_vals}, index=["СД1", "СД2", "СД3", "СД4"])
         st.bar_chart(chart_df)
         
