@@ -1,26 +1,29 @@
 import pandas as pd
+import os
 
 def parse_telemetry_line(line):
     """
-    Парсит строку телеметрии по спецификации хакатона.
+    Парсит строку телеметрии строго по спецификации хакатона.
+    Формат: Преамбула; Время; АКБ; СД1-4; AX,AY,AZ; GX,GY,GZ; MX,MY,MZ; Маховик
     """
     if not isinstance(line, str):
         line = str(line)
     
     parts = line.strip().split(';')
     
+    # Проверка целостности пакета по длине
     if len(parts) < 17:
         return {
             "status": "CORRUPTED",
-            "error": "Неполный пакет",
+            "error": "Неполный пакет (повреждение структуры)",
             "raw": line
         }
     
     try:
-        preamble = parts[0]
+        preamble = parts[0].strip()
         time_ms = int(parts[1])
         
-        # Формулы пересчета по ТЗ
+        # Коэффициенты пересчета строго по ТЗ
         battery_v = int(parts[2]) / 1000.0  
         light = [int(p) for p in parts[3:7]]  
         
@@ -44,16 +47,17 @@ def parse_telemetry_line(line):
         
         flywheel = int(parts[16])       
         
+        # Детекция аномалий
         status = "NORMAL"
         warnings = []
         
-        if battery_v < 3.3 or battery_v > 4.2:
+        if battery_v < 3.0 or battery_v > 4.5:
             status = "WARNING"
-            warnings.append(f"Критическое напряжение АКБ: {battery_v}В")
+            warnings.append(f"Аномальное напряжение АКБ: {battery_v:.2f}В")
             
-        if abs(accel[0]) > 2.0 or abs(accel[1]) > 2.0 or abs(accel[2]) > 2.0:
+        if any(abs(a) > 2.0 for a in accel):
             status = "FAULT"
-            warnings.append("Превышение пределов ускорения")
+            warnings.append("Превышение перегрузки акселерометра")
 
         return {
             "status": status,
@@ -76,8 +80,11 @@ def parse_telemetry_line(line):
         }
 
 def load_local_dataset(filename):
-    path = f"data/{filename}"
+    """Загружает официальный CSV-датасет из папки data/ без заглушек."""
+    path = os.path.join("data", filename)
     try:
+        if not os.path.exists(path):
+            return None
         df = pd.read_csv(path)
         return df
     except Exception:
