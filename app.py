@@ -22,16 +22,14 @@ df = load_local_dataset(filename)
 if df is not None and not df.empty:
     st.sidebar.success(f"Загружено записей: {len(df)}")
     
-    # Парсим весь датасет для построения графиков динамики
     parsed_records = []
-    for i in range(min(len(df), 2000)):  рассматриваем срез для быстрой отрисовки
+    for i in range(min(len(df), 2000)):
         line = str(df.iloc[i].values[0])
         parsed_records.append(parse_telemetry_line(line))
         
     df_parsed = pd.DataFrame(parsed_records)
     
-    # Вкладки интерфейса
-    tab_live, tab_dynamics, tab_raw = st.tabs(["🎛️ Покадровый пульты и кадры", "📈 Динамика полета (Тренд)", "💻 Сырые данные и аудит"])
+    tab_live, tab_dynamics, tab_raw = st.tabs(["🎛️ Пульты и кадры", "📈 Динамика полета (Тренд)", "💻 Сырые данные и аудит"])
     
     with tab_live:
         frame_idx = st.slider("Выбор кадра телеметрии", 0, len(parsed_records) - 1, 0)
@@ -69,12 +67,10 @@ if df is not None and not df.empty:
     with tab_dynamics:
         st.subheader("📈 Графики изменения параметров за полет")
         if not df_parsed.empty:
-            # График напряжения батареи во времени
             st.markdown("**Напряжение АКБ (В) во времени**")
             batt_df = pd.DataFrame({"АКБ (В)": [r["battery_v"] for r in parsed_records]})
             st.line_chart(batt_df)
             
-            # Статистика пакетов
             st.markdown("**Статистика состояния пакетов в датасете:**")
             status_counts = df_parsed["status"].value_counts()
             st.bar_chart(status_counts)
@@ -85,4 +81,4 @@ if df is not None and not df.empty:
         st.code(str(parsed_records[r_idx].get("raw", "")))
         st.json(parsed_records[r_idx])
 else:
-    st.error(f"Не удалось загрузить файл {filename} из папки data/.")
+    st.error(f"Не удалось загрузить файл {filename} из папки data/. Проверьте структуру репозитория.")
