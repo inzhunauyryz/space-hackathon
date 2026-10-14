@@ -3,27 +3,31 @@ import os
 
 def parse_telemetry_line(line):
     """
-    Парсит строку телеметрии строго по спецификации хакатона.
-    Формат: Преамбула; Время; АКБ; СД1-4; AX,AY,AZ; GX,GY,GZ; MX,MY,MZ; Маховик
+    Парсит и валидирует строку телеметрии по полному стандарту ТЗ:
+    Преамбула; Время; АКБ; СД1-4; AX,AY,AZ; GX,GY,GZ; MX,MY,MZ; Маховик; [Постамбула]
     """
     if not isinstance(line, str):
         line = str(line)
     
-    parts = line.strip().split(';')
+    parts = [p.strip() for p in line.strip().split(';')]
     
-    # Проверка целостности пакета по длине
+    # Проверка минимальной структуры пакета (17-18 полей)
     if len(parts) < 17:
         return {
             "status": "CORRUPTED",
-            "error": "Неполный пакет (повреждение структуры)",
+            "error": "Неполный пакет (менее 17 полей)",
             "raw": line
         }
     
     try:
-        preamble = parts[0].strip()
+        preamble = parts[0]
+        # Проверка преамбулы (ожидается маркер пакета)
+        if not preamble:
+            return {"status": "CORRUPTED", "error": "Пустая преамбула", "raw": line}
+            
         time_ms = int(parts[1])
         
-        # Коэффициенты пересчета строго по ТЗ
+        # Пересчет физических величин по ТЗ
         battery_v = int(parts[2]) / 1000.0  
         light = [int(p) for p in parts[3:7]]  
         
@@ -47,17 +51,34 @@ def parse_telemetry_line(line):
         
         flywheel = int(parts[16])       
         
-        # Детекция аномалий
+        # Комплексная детекция аномалий и сбоев датчиков
         status = "NORMAL"
         warnings = []
         
-        if battery_v < 3.0 or battery_v > 4.5:
+        # Валидация напряжения АКБ (штатно 3.3V - 4.2V)
+        if battery_v < 3.2 or battery_v > 4.3:
             status = "WARNING"
-            warnings.append(f"Аномальное напряжение АКБ: {battery_v:.2f}В")
+            warnings.warn(f"Выход напряжения АКБ за нормы: {battery_v:.2f}В")
             
+        # Валидация акселерометра (±2g)
         if any(abs(a) > 2.0 for a in accel):
             status = "FAULT"
-            warnings.append("Превышение перегрузки акселерометра")
+            warnings.append("Превышение перегрузки акселерометра (>2g)")
+            
+        # Валидация гироскопа (±250 °/с)
+        if any(abs(g) > 250.0 for g in gyro):
+            status = "FAULT"
+            warnings.append("Превышение угловой скорости гироскопа (>250°/с)")
+            
+        # Валидация магнитометра (±16 Гс)
+        if any(abs(m) > 16.0 for m in mag):
+            status = "FAULT"
+            warnings.append("Превышение магнитного поля (>16 Гс)")
+            
+        # Валидация датчиков света (0 - 1023 ADC)
+        if any(l < 0 or l > 1023 for l in light):
+            status = "WARNING"
+            warnings.append("Некорректные показания датчиков света")
 
         return {
             "status": status,
@@ -72,15 +93,14 @@ def parse_telemetry_line(line):
             "warnings": warnings,
             "raw": line
         }
-    except (ValueError, IndexError):
+    except (ValueError, IndexError) as e:
         return {
             "status": "CORRUPTED",
-            "error": "Ошибка парсинга типов данных",
+            "error": f"Ошибка преобразования типов: {str(e)}",
             "raw": line
         }
 
 def load_local_dataset(filename):
-    """Загружает официальный CSV-датасет из папки data/ без заглушек."""
     path = os.path.join("data", filename)
     try:
         if not os.path.exists(path):
