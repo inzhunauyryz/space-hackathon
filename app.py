@@ -345,11 +345,13 @@ st.markdown(
 
 # ---------- Вкладки ----------
 
-tab1, tab2, tab3, tab4 = st.tabs([
+tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "📈 Графики",
     "🔬 Датчики",
     "🚨 Журнал событий",
     "📋 Исходные данные",
+    "🛰️ 3D Спутник",
+])
 ])
 
 with tab1:
@@ -483,6 +485,133 @@ with tab4:
 
     with st.expander("Показать сырые пакеты"):
         st.code("\n".join(raw_lines[:100]))
+
+with tab5:
+    import plotly.graph_objects as go
+
+    st.markdown("## 🛰️ Трёхмерная модель спутника")
+    st.caption(
+        "Демонстрационная модель. "
+        "Ориентация не является реальной ориентацией аппарата."
+    )
+
+    # Корпус спутника
+    fig = go.Figure()
+
+    fig.add_trace(go.Mesh3d(
+        x=[-1, 1, 1, -1, -1, 1, 1, -1],
+        y=[-0.6, -0.6, 0.6, 0.6, -0.6, -0.6, 0.6, 0.6],
+        z=[-0.6, -0.6, -0.6, -0.6, 0.6, 0.6, 0.6, 0.6],
+        i=[0, 0, 0, 1, 4, 4, 5, 2, 3, 6, 7, 7],
+        j=[1, 2, 3, 2, 5, 6, 6, 6, 7, 7, 4, 3],
+        k=[2, 3, 7, 5, 6, 7, 2, 3, 4, 2, 0, 0],
+        color="#8fa7c4",
+        opacity=0.95,
+        name="Корпус"
+    ))
+
+    # Левая солнечная панель
+    fig.add_trace(go.Mesh3d(
+        x=[-3, -1.1, -1.1, -3],
+        y=[-0.7, -0.7, 0.7, 0.7],
+        z=[-0.08, -0.08, -0.08, -0.08],
+        i=[0, 0],
+        j=[1, 2],
+        k=[2, 3],
+        color="#1677d2",
+        opacity=0.95,
+        name="Солнечная панель"
+    ))
+
+    # Правая солнечная панель
+    fig.add_trace(go.Mesh3d(
+        x=[1.1, 3, 3, 1.1],
+        y=[-0.7, -0.7, 0.7, 0.7],
+        z=[-0.08, -0.08, -0.08, -0.08],
+        i=[0, 0],
+        j=[1, 2],
+        k=[2, 3],
+        color="#1677d2",
+        opacity=0.95,
+        name="Солнечная панель"
+    ))
+
+    # Оси координат
+    fig.add_trace(go.Scatter3d(
+        x=[0, 2.0],
+        y=[0, 0],
+        z=[0, 0],
+        mode="lines+text",
+        text=["", "X"],
+        line=dict(color="red", width=7),
+        name="Ось X"
+    ))
+
+    fig.add_trace(go.Scatter3d(
+        x=[0, 0],
+        y=[0, 2.0],
+        z=[0, 0],
+        mode="lines+text",
+        text=["", "Y"],
+        line=dict(color="green", width=7),
+        name="Ось Y"
+    ))
+
+    fig.add_trace(go.Scatter3d(
+        x=[0, 0],
+        y=[0, 0],
+        z=[0, 2.0],
+        mode="lines+text",
+        text=["", "Z"],
+        line=dict(color="orange", width=7),
+        name="Ось Z"
+    ))
+
+    fig.update_layout(
+        height=480,
+        margin=dict(l=0, r=0, t=20, b=0),
+        paper_bgcolor="#07111f",
+        font=dict(color="white"),
+        scene=dict(
+            bgcolor="#07111f",
+            xaxis=dict(title="X", color="white"),
+            yaxis=dict(title="Y", color="white"),
+            zaxis=dict(title="Z", color="white"),
+            aspectmode="data",
+        ),
+        legend=dict(
+            font=dict(color="white")
+        ),
+    )
+
+    st.plotly_chart(
+        fig,
+        use_container_width=True,
+        config={
+            "scrollZoom": False,
+            "displaylogo": False,
+        },
+    )
+
+    st.info(
+        "Модель показывает форму и оси спутника. "
+        "Показания датчиков отображаются отдельно; "
+        "для реального поворота нужны данные ориентации."
+    )
+
+    left, right = st.columns(2)
+
+    with left:
+        st.metric(
+            "Напряжение АКБ",
+            f"{latest['battery_v']:.3f} В",
+        )
+
+    with right:
+        st.metric(
+            "Время телеметрии",
+            f"{latest['time_ms'] / 1000:.1f} с",
+        )
 
 st.markdown("---")
 
