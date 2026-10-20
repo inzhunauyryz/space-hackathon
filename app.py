@@ -441,7 +441,7 @@ else:
             with urlopen(request, timeout=8) as response:
                 body = response.read(100_000).decode("utf-8-sig")
 
-            try:
+                        try:
                 payload = json.loads(body)
 
                 if isinstance(payload, dict):
@@ -474,6 +474,17 @@ else:
 
             st.session_state["received_packet"] = (
                 received_lines[-1]
+            )
+
+            if "received_packets" not in st.session_state:
+                st.session_state["received_packets"] = []
+
+            st.session_state["received_packets"].append(
+                received_lines[-1]
+            )
+
+            st.session_state["received_packets"] = (
+                st.session_state["received_packets"][-100:]
             )
 
             if "received_packets" not in st.session_state:
