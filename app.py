@@ -472,9 +472,20 @@ else:
                 st.error("Источник вернул пустой пакет.")
                 st.stop()
 
-            st.session_state["received_packet"] = (
-                received_lines[-1]
-            )
+        st.session_state["received_packet"] = (
+    received_lines[-1]
+)
+
+if "received_packets" not in st.session_state:
+    st.session_state["received_packets"] = []
+
+st.session_state["received_packets"].append(
+    received_lines[-1]
+)
+
+st.session_state["received_packets"] = (
+    st.session_state["received_packets"][-100:]
+)
             st.session_state["received_source"] = (
                 http_url.strip()
             )
@@ -494,9 +505,10 @@ else:
         st.info("Нажми кнопку, чтобы получить пакет.")
         st.stop()
 
-    raw_lines = [
-        st.session_state["received_packet"]
-    ]
+    raw_lines = st.session_state.get(
+    "received_packets",
+    [st.session_state["received_packet"]],
+)
 
     source_label = st.session_state.get(
         "received_source",
