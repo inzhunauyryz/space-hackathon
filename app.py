@@ -439,9 +439,8 @@ else:
             )
 
             with urlopen(request, timeout=8) as response:
-                body = response.read(100_000).decode("utf-8-sig")
-
-                        try:
+                body = response.read(100_000).decode("utf-8-sig")   
+        try:
                 payload = json.loads(body)
 
                 if isinstance(payload, dict):
