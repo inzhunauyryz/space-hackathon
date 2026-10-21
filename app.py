@@ -432,7 +432,7 @@ else:
         "📡 Получить пакет",
         use_container_width=True,
     ):
-                try:
+                        try:
             request = Request(
                 http_url.strip(),
                 headers={"User-Agent": "IntroSat-MCC/1.0"},
