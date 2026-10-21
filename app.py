@@ -432,15 +432,16 @@ else:
         "📡 Получить пакет",
         use_container_width=True,
     ):
-        try:
+                try:
             request = Request(
                 http_url.strip(),
                 headers={"User-Agent": "IntroSat-MCC/1.0"},
             )
 
             with urlopen(request, timeout=8) as response:
-                body = response.read(100_000).decode("utf-8-sig")   
-        try:
+                body = response.read(100_000).decode("utf-8-sig")
+
+            try:
                 payload = json.loads(body)
 
                 if isinstance(payload, dict):
@@ -468,6 +469,12 @@ else:
             ]
 
             if not received_lines:
+                st.error("Источник вернул пустую телеметрию.")
+            else:
+                st.success(
+                    f"Получено строк телеметрии: {len(received_lines)}"
+                )
+
                 st.error("Источник вернул пустой пакет.")
                 st.stop()
 
