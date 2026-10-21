@@ -432,15 +432,16 @@ else:
         "📡 Получить пакет",
         use_container_width=True,
     ):
-        try:
+                try:
             request = Request(
                 http_url.strip(),
                 headers={"User-Agent": "IntroSat-MCC/1.0"},
             )
 
             with urlopen(request, timeout=8) as response:
-                body = response.read(100_000).decode("utf-8-sig")   
-        try:
+                body = response.read(100_000).decode("utf-8-sig")
+
+            try:
                 payload = json.loads(body)
 
                 if isinstance(payload, dict):
@@ -471,9 +472,7 @@ else:
                 st.error("Источник вернул пустой пакет.")
                 st.stop()
 
-            st.session_state["received_packet"] = (
-                received_lines[-1]
-            )
+            st.session_state["received_packet"] = received_lines[-1]
 
             if "received_packets" not in st.session_state:
                 st.session_state["received_packets"] = []
@@ -486,30 +485,7 @@ else:
                 st.session_state["received_packets"][-100:]
             )
 
-            if "received_packets" not in st.session_state:
-                st.session_state["received_packets"] = []
-
-            st.session_state["received_packets"].append(
-                received_lines[-1]
-            )
-
-            st.session_state["received_packets"] = (
-                st.session_state["received_packets"][-100:]
-            )
-
-if "received_packets" not in st.session_state:
-    st.session_state["received_packets"] = []
-
-st.session_state["received_packets"].append(
-    received_lines[-1]
-)
-
-st.session_state["received_packets"] = (
-    st.session_state["received_packets"][-100:]
-)
-            st.session_state["received_source"] = (
-                http_url.strip()
-            )
+            st.session_state["received_source"] = http_url.strip()
 
         except (
             HTTPError,
