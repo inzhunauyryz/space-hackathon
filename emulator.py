@@ -266,14 +266,16 @@ class LatestFrame:
 
 
 def run_http_server(
-    frames: list[str] | None,
-    *,
-    host: str,
-    http_port: int,
-    interval: float,
-    source_port: str | None = None,
-    baudrate: int = DEFAULT_BAUDRATE,
+frames: list[str] | None,
+*,
+host: str,
+http_port: int,
+interval: float,
+source_port: str | None = None,
+baudrate: int = DEFAULT_BAUDRATE,
+scenario_frames: dict[str, list[str]] | None = None,
 ) -> None:
+
     """Запускает HTTP-сервер, который по запросу отдаёт последний кадр."""
 
     latest_frame = LatestFrame()
@@ -322,30 +324,36 @@ def run_http_server(
     class TelemetryHandler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
 
-        def do_GET(self) -> None:
-            if self.path != "/telemetry":
-                self.send_response(404)
-                self.send_header("Content-Type", "text/plain; charset=utf-8")
-                self.send_header("Access-Control-Allow-Origin", "*")
-                self.end_headers()
-                self.wfile.write("Используйте GET /telemetry\n".encode("utf-8"))
-                return
+    def do_GET(self) -> None:
+        parsed_url = urlparse(self.path)
 
-            frame = latest_frame.get()
-            if frame is None:
-                self.send_response(204)
-                self.send_header("Access-Control-Allow-Origin", "*")
-                self.end_headers()
-                return
-
-            body = frame.encode("utf-8")
-            self.send_response(200)
+        if parsed_url.path != "/telemetry":
+            self.send_response(404)
             self.send_header("Content-Type", "text/plain; charset=utf-8")
-            self.send_header("Content-Length", str(len(body)))
-            self.send_header("Cache-Control", "no-cache")
             self.send_header("Access-Control-Allow-Origin", "*")
             self.end_headers()
-            self.wfile.write(body)
+            self.wfile.write("Используйте GET /telemetry\n".encode("utf-8"))
+            return
+
+        params = parse_qs(parsed_url.query)
+        scenario = params.get("scenario", [""])[0]
+
+        frame = latest_frame.get()
+
+        if frame is None:
+            self.send_response(204)
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            return
+
+        body = frame.encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+        self.wfile.write(body)
 
         def log_message(self, format: str, *args: object) -> None:
             return
