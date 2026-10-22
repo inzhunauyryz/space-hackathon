@@ -618,9 +618,16 @@ for line in raw_lines:
         })
 
 
+```python
 # -------------------- Демонстрационные сценарии --------------------
 
-if mission_mode == "Отказ датчика (демо)" and parsed:
+if mission_mode == "Нормальный полёт (демо)" and parsed:
+    for item in parsed:
+        if item.get("status") != "CORRUPTED":
+            item["status"] = "NORMAL"
+            item["warnings"] = []
+
+elif mission_mode == "Отказ датчика (демо)" and parsed:
     target = next(
         (
             item
@@ -632,11 +639,11 @@ if mission_mode == "Отказ датчика (демо)" and parsed:
 
     if target is not None:
         target["status"] = "FAULT"
-        target.setdefault("warnings", []).append(
+        target["warnings"] = [
             "ДЕМО: смоделирован отказ одного из датчиков."
-        )
+        ]
 
-if mission_mode == "Помехи связи (демо)" and parsed:
+elif mission_mode == "Помехи связи (демо)" and parsed:
     for index, item in enumerate(parsed):
         if index % 3 == 0:
             item["status"] = "CORRUPTED"
@@ -644,6 +651,8 @@ if mission_mode == "Помехи связи (демо)" and parsed:
                 "ДЕМО: имитация потери или повреждения "
                 "пакета при радиопомехах."
             )
+```
+
 
 
 # -------------------- Подсчёт статусов --------------------
