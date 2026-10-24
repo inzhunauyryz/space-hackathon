@@ -16,7 +16,8 @@ from datetime import datetime
 
 from telemetry import FAULT, HEADER, MODULES, OK, Validator
 
-DEFAULT_URL = "http://127.0.0.1:8765/telemetry"
+# адрес можно задать переменной окружения TELEMETRY_URL (например, ссылка на ваш Render)
+DEFAULT_URL = os.environ.get("TELEMETRY_URL", "http://127.0.0.1:8765/telemetry")
 STALL_SEC = 3.0      # нет новых пакетов дольше — «передача прервана»
 IDLE_STOP = 300      # никто не смотрит интерфейс — поток останавливается
 
