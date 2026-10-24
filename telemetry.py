@@ -27,7 +27,8 @@ MAG_LIMIT = 16.0  # диапазон магнитометра, Гс
 # ПОРОГИ — при необходимости поправьте после прогона 01_normal_flight.csv
 BATT_WARN = (3.3, 4.25)    # В: вне диапазона — «внимание»
 BATT_FAULT = (3.0, 4.5)    # В: вне диапазона — «авария»
-ZERO_N = 15                # столько пакетов подряд «нули» = датчик отключён
+ZERO_N = 15                # столько пакетов подряд «нули» = предупреждение
+ZERO_FAULT_N = 150         # столько пакетов подряд «нули» = авария (отказ датчика)
 STUCK_N = 60               # столько пакетов подряд без изменений = залип
 JUMP_IMU = 16384           # скачок между соседними пакетами (сырые единицы)
 JUMP_LIGHT = 32768
@@ -68,6 +69,7 @@ class Validator:
         self._pre_c, self._post_c, self._learned = Counter(), Counter(), 0
         self.last_t, self._cand, self._dts = None, None, deque(maxlen=50)
         self.prev, self._same = None, {}
+        self._akb_hist, self._akb_base = [], None
 
     # ---------- служебное ----------
     def _learn(self, pre, post):
@@ -82,6 +84,24 @@ class Validator:
                     val, n = c.most_common(1)[0]
                     if n / self._learned >= 0.6:
                         setattr(self, attr, val)
+
+    def _akb_limits(self, u):
+        """Пороги АКБ (warn_lo, warn_hi, fault_lo, fault_hi).
+
+        Рабочее напряжение определяется по медиане первых 20 пакетов: если оно
+        похоже на одну Li-ion ячейку — действуют BATT_*, иначе пороги задаются
+        относительно него (так питание 5 В или 7.4 В не даёт ложных аварий).
+        До определения базы пороги не применяются."""
+        if self._akb_base is None:
+            if u > 0:
+                self._akb_hist.append(u)
+            if len(self._akb_hist) >= 20:
+                self._akb_base = median(self._akb_hist)
+            return None
+        b = self._akb_base
+        if BATT_FAULT[0] <= b <= BATT_FAULT[1]:
+            return BATT_WARN + BATT_FAULT
+        return (0.75 * b, 1.25 * b, 0.5 * b, 1.5 * b)
 
     def _run(self, key, val):
         last, n = self._same.get(key, (None, 0))
@@ -148,10 +168,14 @@ class Validator:
             add("power", FAULT, "АКБ: отрицательное значение")
         else:
             u = v["akb"] = r["akb"] / 1000
-            if not BATT_FAULT[0] <= u <= BATT_FAULT[1]:
-                add("power", FAULT, f"АКБ {u:.2f} В — критично")
-            elif not BATT_WARN[0] <= u <= BATT_WARN[1]:
-                add("power", WARN, f"АКБ {u:.2f} В — вне нормы")
+            lim = self._akb_limits(u)
+            if u == 0:
+                add("power", FAULT, "АКБ: нет напряжения")
+            elif lim:
+                if not lim[2] <= u <= lim[3]:
+                    add("power", FAULT, f"АКБ {u:.2f} В — критично")
+                elif not lim[0] <= u <= lim[1]:
+                    add("power", WARN, f"АКБ {u:.2f} В — вне нормы")
 
         # датчики света
         for i in range(1, 5):
@@ -162,7 +186,8 @@ class Validator:
                     add("light", WARN, f"СД{i}: насыщение")
                 n = self._run(k, x)
                 if x == 0 and n >= ZERO_N:
-                    add("light", FAULT, f"СД{i}: нет сигнала (возможно, отключён)")
+                    add("light", FAULT if n >= ZERO_FAULT_N else WARN,
+                        f"СД{i}: нет сигнала (тень или отключён)")
                 elif n >= STUCK_N:
                     add("light", WARN, f"СД{i}: показания не меняются")
             else:
@@ -186,7 +211,8 @@ class Validator:
                 tup = tuple(r[key] for key in keys)
                 n = self._run(title, tup)
                 if not any(tup) and n >= ZERO_N:
-                    add("imu", FAULT, f"{title}: нет сигнала (отключён?)")
+                    add("imu", FAULT if n >= ZERO_FAULT_N else WARN,
+                        f"{title}: нет сигнала (отключён?)")
                 elif n >= STUCK_N:
                     add("imu", WARN, f"{title}: показания не меняются")
             else:
