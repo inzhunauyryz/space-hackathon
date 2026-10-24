@@ -1,188 +1,123 @@
-from pathlib import Path
+import os
+import re
+from collections import Counter
 
 import pandas as pd
 
+# Формат пакета (18 полей через «;»):
+# ПРЕАМБУЛА;ВРЕМЯ;АКБ;СД1-4;AX;AY;AZ;GX;GY;GZ;MX;MY;MZ;МАХОВИК;ПОСТАМБУЛА
+N_FIELDS = 18
+BATT_MIN, BATT_MAX = 3.2, 4.3      # В, вне диапазона — предупреждение
+_INT = re.compile(r"^-?\d+$")
 
-BASE_DIR = Path(__file__).resolve().parent
-DATA_DIR = BASE_DIR / "data"
+# Маркеры преамбулы/постамбулы определяются по первым пакетам (самое частое значение)
+_seen = {"pre": Counter(), "post": Counter(), "n": 0}
+_expected = {"pre": None, "post": None}
 
-# Рабочие пороги напряжения аккумулятора.
-# Перед защитой нужно сверить их с техническим заданием.
-BATTERY_MIN_V = 3.2
-BATTERY_MAX_V = 4.3
 
-LIGHT_MIN = 0
-LIGHT_MAX = 65535
+def _learn_markers(pre, post):
+    if _expected["pre"] is not None and _expected["post"] is not None:
+        return
+    _seen["n"] += 1
+    _seen["pre"][pre] += 1
+    _seen["post"][post] += 1
+    if _seen["n"] >= 20:
+        for key in ("pre", "post"):
+            if _expected[key] is None:
+                value, count = _seen[key].most_common(1)[0]
+                if count / _seen["n"] >= 0.6:
+                    _expected[key] = value
 
-INT16_MIN = -32768
-INT16_MAX = 32767
+
+def _corrupted(line, error):
+    return {"status": "CORRUPTED", "error": error, "raw": line}
 
 
 def parse_telemetry_line(line):
-    """Разбирает один пакет телеметрии и проверяет значения."""
+    """Разбор и проверка одной строки телеметрии.
 
-    raw = str(line).strip()
+    Статусы: NORMAL, WARNING, FAULT (авария), CORRUPTED (пакет не разобран).
+    """
+    if not isinstance(line, str):
+        line = str(line)
+    parts = [p.strip() for p in line.strip().split(";")]
+    if len(parts) == N_FIELDS + 1 and parts[-1] == "":
+        parts.pop()
+    if len(parts) != N_FIELDS:
+        return _corrupted(line, f"Неверное число полей: {len(parts)} вместо {N_FIELDS}")
 
-    result = {
-        "status": "CORRUPTED",
-        "warnings": [],
-        "error": None,
-        "raw": raw,
-    }
+    bad = [i for i in range(1, 17) if not _INT.match(parts[i])]
+    if bad:
+        return _corrupted(line, f"Нечисловые значения в полях: {bad[:5]}")
 
-    if not raw:
-        result["error"] = "Пустой пакет телеметрии"
-        return result
+    preamble, postamble = parts[0], parts[17]
+    _learn_markers(preamble, postamble)
+    if not preamble or (_expected["pre"] is not None and preamble != _expected["pre"]):
+        return _corrupted(line, "Повреждена преамбула")
+    if not postamble or (_expected["post"] is not None and postamble != _expected["post"]):
+        return _corrupted(line, "Повреждена постамбула")
 
-    parts = [part.strip() for part in raw.split(";")]
+    n = [int(p) for p in parts[1:17]]
+    time_ms, akb, light = n[0], n[1], n[2:6]
+    acc_raw, gyr_raw, mag_raw, flywheel = n[6:9], n[9:12], n[12:15], n[15]
 
-    if len(parts) not in (17, 18):
-        result["error"] = (
-            f"Неверное количество полей: {len(parts)}. "
-            "Ожидается 17 или 18."
-        )
-        return result
+    battery_v = akb / 1000.0
+    accel = [a / 16384.0 for a in acc_raw]
+    gyro = [g / 131.072 for g in gyr_raw]
+    mag = [m / 1711.6 for m in mag_raw]
 
-    if not parts[0]:
-        result["error"] = "Отсутствует преамбула"
-        return result
+    fault, warn = [], []
 
-    try:
-        time_ms = int(parts[1])
+    if time_ms < 0:
+        fault.append("Отрицательное время пакета")
 
-        if time_ms < 0:
-            result["error"] = "Время не может быть отрицательным"
-            return result
+    if akb <= 0:
+        fault.append("Нет напряжения АКБ")
+    elif battery_v < BATT_MIN or battery_v > BATT_MAX:
+        warn.append(f"Напряжение АКБ вне нормы: {battery_v:.2f} В")
 
-        values = [int(value) for value in parts[2:17]]
+    if any(l < 0 or l > 65535 for l in light):
+        fault.append("Датчик света: значение вне диапазона 0…65535")
+    elif any(l == 65535 for l in light):
+        warn.append("Датчик света: насыщение")
 
-    except ValueError:
-        result["error"] = (
-            "Время или числовые поля содержат некорректные данные"
-        )
-        return result
+    for name, raw in (("Акселерометр", acc_raw), ("Гироскоп", gyr_raw),
+                      ("Магнитометр", mag_raw), ("Маховик", [flywheel])):
+        if any(v < -32768 or v > 32767 for v in raw):
+            fault.append(f"{name}: значение вне диапазона int16")
+        elif any(v in (-32768, 32767) for v in raw):
+            warn.append(f"{name}: насыщение (граничное значение)")
 
-    if len(parts) == 18 and not parts[17]:
-        result["error"] = "Отсутствует постамбула"
-        return result
+    if any(abs(m) > 16.0 for m in mag):
+        fault.append("Превышение магнитного поля (>16 Гс)")
 
-    battery_raw = values[0]
-    light_raw = values[1:5]
-    accel_raw = values[5:8]
-    gyro_raw = values[8:11]
-    mag_raw = values[11:14]
-    flywheel = values[14]
-
-    # Проверка целочисленных диапазонов датчиков.
-    signed_values = (
-        accel_raw + gyro_raw + mag_raw + [flywheel]
-    )
-
-    if any(
-        value < INT16_MIN or value > INT16_MAX
-        for value in signed_values
-    ):
-        result["error"] = (
-            "Показания датчиков или маховика выходят "
-            "за пределы диапазона int16"
-        )
-        return result
-
-    if any(
-        value < LIGHT_MIN or value > LIGHT_MAX
-        for value in light_raw
-    ):
-        result["error"] = (
-            "Показания освещённости вне диапазона 0–65535"
-        )
-        return result
-
-    # Перевод сырых показаний в физические единицы.
-    battery_v = battery_raw / 1000.0
-    accel = [value / 16384.0 for value in accel_raw]
-    gyro = [value / 131.072 for value in gyro_raw]
-    mag = [value / 1711.6 for value in mag_raw]
-
-    warnings_list = []
-    status = "NORMAL"
-
-    # Проверка аккумулятора.
-    if not BATTERY_MIN_V <= battery_v <= BATTERY_MAX_V:
-        status = "WARNING"
-        warnings_list.append(
-            f"Напряжение аккумулятора: {battery_v:.3f} В"
-        )
-
-    # Проверка диапазонов датчиков.
-    if any(abs(value) > 2.0 for value in accel):
-        status = "FAULT"
-        warnings_list.append(
-            "Акселерометр: превышен диапазон ±2 g"
-        )
-
-    if any(abs(value) > 250.0 for value in gyro):
-        status = "FAULT"
-        warnings_list.append(
-            "Гироскоп: превышен диапазон ±250 °/с"
-        )
-
-    if any(abs(value) > 16.0 for value in mag):
-        status = "FAULT"
-        warnings_list.append(
-            "Магнитометр: превышен диапазон ±16 Гс"
-        )
-
-    result.update({
+    status = "FAULT" if fault else ("WARNING" if warn else "NORMAL")
+    return {
         "status": status,
-        "error": None,
-        "preamble": parts[0],
+        "preamble": preamble,
         "time_ms": time_ms,
         "battery_v": battery_v,
-        "light": light_raw,
+        "light": light,
         "accel": accel,
         "gyro": gyro,
         "mag": mag,
         "flywheel": flywheel,
-        "warnings": warnings_list,
-    })
-
-    return result
+        "warnings": fault + warn,
+        "raw": line,
+    }
 
 
 def load_local_dataset(filename):
-    """Загружает текстовые пакеты телеметрии из папки data."""
+    """Читает файл построчно как есть (битые строки из радиошума не ломают загрузку).
 
-    path = DATA_DIR / filename
-
-    if not path.is_file():
-        return None
-
+    Возвращает DataFrame с одной колонкой «raw»; первая непустая строка — заголовок.
+    """
+    path = os.path.join("data", filename)
     try:
-        text = path.read_text(encoding="utf-8-sig")
-    except (OSError, UnicodeError):
+        if not os.path.exists(path):
+            return None
+        with open(path, encoding="utf-8-sig", errors="replace") as fh:
+            lines = [x.strip() for x in fh if x.strip()]
+        return pd.DataFrame({"raw": lines[1:]})
+    except Exception:
         return None
-
-    lines = [
-        line.strip()
-        for line in text.splitlines()
-        if line.strip()
-    ]
-
-    if not lines:
-        return pd.DataFrame({"raw": []})
-
-    # Пропускаем заголовок CSV, если он действительно есть.
-    first = lines[0].lower()
-
-    if any(
-        marker in first
-        for marker in (
-            "время от запуска",
-            "постамбула",
-            "time_ms",
-            "battery",
-        )
-    ):
-        lines = lines[1:]
-
-    return pd.DataFrame({"raw": lines})
