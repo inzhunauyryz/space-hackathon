@@ -17,7 +17,7 @@ def run_cli_audit():
         faults = 0
         corrupted = 0
         
-        for idx in range(min(total, 1000))):  # Проверяем до 1000 строк
+        for idx in range(min(total, 1000)):  # Проверяем до 1000 строк
             row_str = str(df.iloc[idx].values[0])
             res = parse_telemetry_line(row_str)
             if res["status"] == "NORMAL":
