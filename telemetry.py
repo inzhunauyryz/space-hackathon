@@ -1,248 +1,188 @@
-"""Разбор и проверка пакетов телеметрии «ИнтроСат» (без зависимостей от Streamlit).
+from pathlib import Path
 
-Формат пакета: 18 полей через «;»
-ПРЕАМБУЛА;ВРЕМЯ;АКБ;СД1..СД4;AX;AY;AZ;GX;GY;GZ;MX;MY;MZ;МАХОВИК;ПОСТАМБУЛА
-
-Validator проверяет каждый пакет и всю последовательность (время, залипание,
-скачки) и возвращает Frame со статусом NORMAL / WARNING / FAULT / CORRUPTED.
-"""
-import math
-import re
-from collections import Counter, deque
-from dataclasses import dataclass, field
-from statistics import median
-
-FIELD_NAMES = ["ПРЕАМБУЛА", "ВРЕМЯ", "АКБ", "СД1", "СД2", "СД3", "СД4",
-               "AX", "AY", "AZ", "GX", "GY", "GZ", "MX", "MY", "MZ",
-               "МАХОВИК", "ПОСТАМБУЛА"]
-HEADER = ";".join(FIELD_NAMES)
-N_FIELDS = len(FIELD_NAMES)
-CH = ["t", "akb", "sd1", "sd2", "sd3", "sd4", "ax", "ay", "az",
-      "gx", "gy", "gz", "mx", "my", "mz", "wheel"]  # числовые поля 1..16
-
-# Коэффициенты перевода в физические величины (из ТЗ)
-ACC_K, GYR_K, MAG_K = 16384.0, 131.072, 1711.6
-MAG_LIMIT = 16.0  # диапазон магнитометра, Гс
-
-# ПОРОГИ — при необходимости поправьте после прогона 01_normal_flight.csv
-BATT_WARN = (3.3, 4.25)    # В: вне диапазона — «внимание»
-BATT_FAULT = (3.0, 4.5)    # В: вне диапазона — «авария»
-ZERO_N = 15                # столько пакетов подряд «нули» = предупреждение
-ZERO_FAULT_N = 150         # столько пакетов подряд «нули» = авария (отказ датчика)
-STUCK_N = 60               # столько пакетов подряд без изменений = залип
-JUMP_IMU = 16384           # скачок между соседними пакетами (сырые единицы)
-JUMP_LIGHT = 32768
-TIME_JUMP_X = 10           # скачок времени > 10 медианных шагов
-
-OK, WARN, FAULT = 0, 1, 2
-LEVEL_TEXT = {OK: "норма", WARN: "внимание", FAULT: "авария"}
-MODULES = {"mcu": "Микроконтроллер", "power": "Питание",
-           "imu": "Датчик положения", "light": "Датчики света",
-           "wheel": "Плата маховика"}
-IMU = (("Акселерометр", ("ax", "ay", "az"), ACC_K),
-       ("Гироскоп", ("gx", "gy", "gz"), GYR_K),
-       ("Магнитометр", ("mx", "my", "mz"), MAG_K))
-
-NAN = float("nan")
-_INT = re.compile(r"^-?\d+$")
+import pandas as pd
 
 
-@dataclass
-class Frame:
-    seq: int
-    raw: str
-    status: str = "NORMAL"                 # NORMAL / WARNING / FAULT / CORRUPTED
-    issues: list = field(default_factory=list)   # (модуль, уровень, текст)
-    t: int | None = None
-    vals: dict | None = None               # физические значения; NaN = невалидно
+BASE_DIR = Path(__file__).resolve().parent
+DATA_DIR = BASE_DIR / "data"
 
-    @property
-    def valid(self):
-        return self.vals is not None
+# Рабочие пороги напряжения аккумулятора.
+# Перед защитой нужно сверить их с техническим заданием.
+BATTERY_MIN_V = 3.2
+BATTERY_MAX_V = 4.3
+
+LIGHT_MIN = 0
+LIGHT_MAX = 65535
+
+INT16_MIN = -32768
+INT16_MAX = 32767
 
 
-class Validator:
-    def __init__(self, preamble=None, postamble=None):
-        # Если маркеры не заданы, они определяются по первым пакетам
-        # (самое частое значение) — их точный вид в ТЗ не указан.
-        self.pre, self.post = preamble, postamble
-        self._pre_c, self._post_c, self._learned = Counter(), Counter(), 0
-        self.last_t, self._cand, self._dts = None, None, deque(maxlen=50)
-        self.prev, self._same = None, {}
-        self._akb_hist, self._akb_base = [], None
+def parse_telemetry_line(line):
+    """Разбирает один пакет телеметрии и проверяет значения."""
 
-    # ---------- служебное ----------
-    def _learn(self, pre, post):
-        if self._learned >= 200 or (self.pre and self.post):
-            return
-        self._learned += 1
-        self._pre_c[pre] += 1
-        self._post_c[post] += 1
-        if self._learned >= 20:
-            for attr, c in (("pre", self._pre_c), ("post", self._post_c)):
-                if getattr(self, attr) is None:
-                    val, n = c.most_common(1)[0]
-                    if n / self._learned >= 0.6:
-                        setattr(self, attr, val)
+    raw = str(line).strip()
 
-    def _akb_limits(self, u):
-        """Пороги АКБ (warn_lo, warn_hi, fault_lo, fault_hi).
+    result = {
+        "status": "CORRUPTED",
+        "warnings": [],
+        "error": None,
+        "raw": raw,
+    }
 
-        Рабочее напряжение определяется по медиане первых 20 пакетов: если оно
-        похоже на одну Li-ion ячейку — действуют BATT_*, иначе пороги задаются
-        относительно него (так питание 5 В или 7.4 В не даёт ложных аварий).
-        До определения базы пороги не применяются."""
-        if self._akb_base is None:
-            if u > 0:
-                self._akb_hist.append(u)
-            if len(self._akb_hist) >= 20:
-                self._akb_base = median(self._akb_hist)
-            return None
-        b = self._akb_base
-        if BATT_FAULT[0] <= b <= BATT_FAULT[1]:
-            return BATT_WARN + BATT_FAULT
-        return (0.75 * b, 1.25 * b, 0.5 * b, 1.5 * b)
+    if not raw:
+        result["error"] = "Пустой пакет телеметрии"
+        return result
 
-    def _run(self, key, val):
-        last, n = self._same.get(key, (None, 0))
-        n = n + 1 if val == last else 1
-        self._same[key] = (val, n)
-        return n
+    parts = [part.strip() for part in raw.split(";")]
 
-    @staticmethod
-    def _corrupt(f, text):
-        f.status = "CORRUPTED"
-        f.issues = [("link", FAULT, text)]
-        return f
+    if len(parts) not in (17, 18):
+        result["error"] = (
+            f"Неверное количество полей: {len(parts)}. "
+            "Ожидается 17 или 18."
+        )
+        return result
 
-    def _check_time(self, t, add):
-        if t < 0:
-            return add("mcu", FAULT, f"отрицательное время ({t})")
-        if self.last_t is None:
-            self.last_t = t
-            return
-        big = TIME_JUMP_X * median(self._dts) if len(self._dts) >= 5 else None
-        dt = t - self.last_t
-        if dt > 0 and (not big or dt <= big):
-            self._dts.append(dt)
-            self.last_t, self._cand = t, None
-            return
-        if dt == 0:
-            return add("mcu", WARN, "повтор метки времени")
-        step = t - self._cand if self._cand is not None else 0
-        if step > 0 and (not big or step <= big):
-            self.last_t, self._cand = t, None   # новая «база» подтвердилась
-            return add("mcu", WARN, "разрыв времени (пропуск пакетов или перезапуск МК)")
-        self._cand = t
-        add("mcu", WARN, "время идёт назад" if dt < 0 else f"скачок времени на {dt}")
+    if not parts[0]:
+        result["error"] = "Отсутствует преамбула"
+        return result
 
-    # ---------- основной разбор ----------
-    def process(self, raw, seq):
-        f = Frame(seq=seq, raw=raw)
-        parts = [p.strip() for p in raw.strip().split(";")]
-        if len(parts) == N_FIELDS + 1 and parts[-1] == "":
-            parts.pop()
-        if len(parts) != N_FIELDS:
-            return self._corrupt(f, f"неверное число полей: {len(parts)} из {N_FIELDS}")
-        bad = [FIELD_NAMES[i] for i in range(1, 17) if not _INT.match(parts[i])]
-        if bad:
-            return self._corrupt(f, "нечисловые значения: " + ", ".join(bad[:4]))
-        self._learn(parts[0], parts[17])
-        if self.pre is not None and parts[0] != self.pre:
-            return self._corrupt(f, "повреждена преамбула")
-        if self.post is not None and parts[17] != self.post:
-            return self._corrupt(f, "повреждена постамбула")
+    try:
+        time_ms = int(parts[1])
 
-        r = dict(zip(CH, map(int, parts[1:17])))
-        issues, v = f.issues, {}
+        if time_ms < 0:
+            result["error"] = "Время не может быть отрицательным"
+            return result
 
-        def add(m, lvl, txt):
-            issues.append((m, lvl, txt))
+        values = [int(value) for value in parts[2:17]]
 
-        f.t = r["t"]
-        self._check_time(r["t"], add)
+    except ValueError:
+        result["error"] = (
+            "Время или числовые поля содержат некорректные данные"
+        )
+        return result
 
-        # питание (АКБ в мВ)
-        if r["akb"] < 0:
-            v["akb"] = NAN
-            add("power", FAULT, "АКБ: отрицательное значение")
-        else:
-            u = v["akb"] = r["akb"] / 1000
-            lim = self._akb_limits(u)
-            if u == 0:
-                add("power", FAULT, "АКБ: нет напряжения")
-            elif lim:
-                if not lim[2] <= u <= lim[3]:
-                    add("power", FAULT, f"АКБ {u:.2f} В — критично")
-                elif not lim[0] <= u <= lim[1]:
-                    add("power", WARN, f"АКБ {u:.2f} В — вне нормы")
+    if len(parts) == 18 and not parts[17]:
+        result["error"] = "Отсутствует постамбула"
+        return result
 
-        # датчики света
-        for i in range(1, 5):
-            k, x = f"sd{i}", r[f"sd{i}"]
-            if 0 <= x <= 65535:
-                v[k] = float(x)
-                if x == 65535:
-                    add("light", WARN, f"СД{i}: насыщение")
-                n = self._run(k, x)
-                if x == 0 and n >= ZERO_N:
-                    add("light", FAULT if n >= ZERO_FAULT_N else WARN,
-                        f"СД{i}: нет сигнала (тень или отключён)")
-                elif n >= STUCK_N:
-                    add("light", WARN, f"СД{i}: показания не меняются")
-            else:
-                v[k] = NAN
-                self._same.pop(k, None)
-                add("light", FAULT, f"СД{i}: значение вне диапазона ({x})")
+    battery_raw = values[0]
+    light_raw = values[1:5]
+    accel_raw = values[5:8]
+    gyro_raw = values[8:11]
+    mag_raw = values[11:14]
+    flywheel = values[14]
 
-        # датчик положения
-        for title, keys, k in IMU:
-            ok = True
-            for key in keys:
-                x = r[key]
-                if -32768 <= x <= 32767:
-                    v[key] = x / k
-                    if x in (-32768, 32767):
-                        add("imu", WARN, f"{title}: насыщение {key.upper()}")
-                else:
-                    ok, v[key] = False, NAN
-                    add("imu", FAULT, f"{title}: {key.upper()} вне диапазона ({x})")
-            if ok:
-                tup = tuple(r[key] for key in keys)
-                n = self._run(title, tup)
-                if not any(tup) and n >= ZERO_N:
-                    add("imu", FAULT if n >= ZERO_FAULT_N else WARN,
-                        f"{title}: нет сигнала (отключён?)")
-                elif n >= STUCK_N:
-                    add("imu", WARN, f"{title}: показания не меняются")
-            else:
-                self._same.pop(title, None)
-            if title == "Магнитометр" and any(
-                    abs(v[key]) > MAG_LIMIT for key in keys if not math.isnan(v[key])):
-                add("imu", WARN, "магнитометр: выход за ±16 Гс")
+    # Проверка целочисленных диапазонов датчиков.
+    signed_values = (
+        accel_raw + gyro_raw + mag_raw + [flywheel]
+    )
 
-        # маховик
-        if -32768 <= r["wheel"] <= 32767:
-            v["wheel"] = float(r["wheel"])
-        else:
-            v["wheel"] = NAN
-            add("wheel", FAULT, f"МАХОВИК вне диапазона ({r['wheel']})")
+    if any(
+        value < INT16_MIN or value > INT16_MAX
+        for value in signed_values
+    ):
+        result["error"] = (
+            "Показания датчиков или маховика выходят "
+            "за пределы диапазона int16"
+        )
+        return result
 
-        # резкие скачки относительно предыдущего пакета («хаотичные данные»)
-        if self.prev:
-            jl = [k for k in ("sd1", "sd2", "sd3", "sd4")
-                  if 0 <= r[k] <= 65535 and 0 <= self.prev[k] <= 65535
-                  and abs(r[k] - self.prev[k]) > JUMP_LIGHT]
-            ji = [k for _, keys, _ in IMU for k in keys
-                  if abs(r[k]) <= 32768 and abs(self.prev[k]) <= 32768
-                  and abs(r[k] - self.prev[k]) > JUMP_IMU]
-            if jl:
-                add("light", WARN, "резкий скачок: " + ", ".join(k.upper() for k in jl))
-            if ji:
-                add("imu", WARN, "резкий скачок: " + ", ".join(k.upper() for k in ji))
-        self.prev = r
+    if any(
+        value < LIGHT_MIN or value > LIGHT_MAX
+        for value in light_raw
+    ):
+        result["error"] = (
+            "Показания освещённости вне диапазона 0–65535"
+        )
+        return result
 
-        f.vals = v
-        worst = max((lv for _, lv, _ in issues), default=OK)
-        f.status = ("NORMAL", "WARNING", "FAULT")[worst]
-        return f
+    # Перевод сырых показаний в физические единицы.
+    battery_v = battery_raw / 1000.0
+    accel = [value / 16384.0 for value in accel_raw]
+    gyro = [value / 131.072 for value in gyro_raw]
+    mag = [value / 1711.6 for value in mag_raw]
+
+    warnings_list = []
+    status = "NORMAL"
+
+    # Проверка аккумулятора.
+    if not BATTERY_MIN_V <= battery_v <= BATTERY_MAX_V:
+        status = "WARNING"
+        warnings_list.append(
+            f"Напряжение аккумулятора: {battery_v:.3f} В"
+        )
+
+    # Проверка диапазонов датчиков.
+    if any(abs(value) > 2.0 for value in accel):
+        status = "FAULT"
+        warnings_list.append(
+            "Акселерометр: превышен диапазон ±2 g"
+        )
+
+    if any(abs(value) > 250.0 for value in gyro):
+        status = "FAULT"
+        warnings_list.append(
+            "Гироскоп: превышен диапазон ±250 °/с"
+        )
+
+    if any(abs(value) > 16.0 for value in mag):
+        status = "FAULT"
+        warnings_list.append(
+            "Магнитометр: превышен диапазон ±16 Гс"
+        )
+
+    result.update({
+        "status": status,
+        "error": None,
+        "preamble": parts[0],
+        "time_ms": time_ms,
+        "battery_v": battery_v,
+        "light": light_raw,
+        "accel": accel,
+        "gyro": gyro,
+        "mag": mag,
+        "flywheel": flywheel,
+        "warnings": warnings_list,
+    })
+
+    return result
+
+
+def load_local_dataset(filename):
+    """Загружает текстовые пакеты телеметрии из папки data."""
+
+    path = DATA_DIR / filename
+
+    if not path.is_file():
+        return None
+
+    try:
+        text = path.read_text(encoding="utf-8-sig")
+    except (OSError, UnicodeError):
+        return None
+
+    lines = [
+        line.strip()
+        for line in text.splitlines()
+        if line.strip()
+    ]
+
+    if not lines:
+        return pd.DataFrame({"raw": []})
+
+    # Пропускаем заголовок CSV, если он действительно есть.
+    first = lines[0].lower()
+
+    if any(
+        marker in first
+        for marker in (
+            "время от запуска",
+            "постамбула",
+            "time_ms",
+            "battery",
+        )
+    ):
+        lines = lines[1:]
+
+    return pd.DataFrame({"raw": lines})
