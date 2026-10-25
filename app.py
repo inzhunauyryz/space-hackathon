@@ -1,6 +1,7 @@
 import html
 import re
 import time
+import urllib.error
 import urllib.request
 from collections import deque
 
@@ -14,6 +15,7 @@ st.set_page_config(page_title="ЦУП ИнтроСат", page_icon="🛰️", la
 
 EMULATOR_URL = "https://space-telemetry-emulator.onrender.com/telemetry"
 STALL_SEC = 3.0   # столько секунд без новых пакетов = «передача прервана»
+HEADER = "ПРЕАМБУЛА;ВРЕМЯ ОТ ЗАПУСКА МК;АКБ;СД1;СД2;СД3;СД4;AX;AY;AZ;GX;GY;GZ;MX;MY;MZ;МАХОВИК;ПОСТАМБУЛА"
 
 GREEN, YELLOW, RED, GREY = "#1f9d55", "#e6a700", "#d62839", "#56606b"
 LEVEL_UI = {OK: (GREEN, "НОРМА"), WARN: (YELLOW, "ВНИМАНИЕ"), FAULT: (RED, "АВАРИЯ")}
@@ -131,7 +133,8 @@ def init_live_state():
     s = st.session_state
     defaults = {"lv_raw": None, "lv_rx": None, "lv_rec": None, "lv_valid": None,
                 "lv_hist": deque(maxlen=600), "lv_status": deque(maxlen=30), "lv_counts": {},
-                "lv_events": [], "lv_sig": None, "lv_checker": SequenceChecker(), "lv_seq": 0}
+                "lv_events": [], "lv_sig": None, "lv_checker": SequenceChecker(), "lv_seq": 0,
+                "lv_log": deque(maxlen=50000), "cmds": [], "export": None}
     for key, default in defaults.items():
         s.setdefault(key, default)
 
@@ -147,6 +150,7 @@ def live_view(url):
             break
         if raw and raw.strip() and raw != s.lv_raw:
             s.lv_raw, s.lv_rx, s.lv_seq = raw, time.time(), s.lv_seq + 1
+            s.lv_log.append(raw.strip())   # журнал принятых пакетов (как есть)
             rec = parse_telemetry_line(raw)
             if rec["status"] != "CORRUPTED":
                 s.lv_checker.apply(rec)
@@ -201,6 +205,14 @@ def live_view(url):
 
 
 # ---------------------------------------------------------------- режим «Файл»
+@st.cache_resource(show_spinner="Разбор лога…")
+def parse_text(text):
+    lines = [x.strip() for x in text.splitlines() if x.strip()][1:]   # первая строка — заголовок
+    if not lines:
+        return None
+    return analyze([parse_telemetry_line(x) for x in lines])
+
+
 @st.cache_resource(show_spinner="Разбор файла…")
 def parse_file(filename):
     df = load_local_dataset(filename)
@@ -215,11 +227,16 @@ def file_view():
         "02_sensor_faults.csv (Сбои датчиков)": "02_sensor_faults.csv",
         "03_radio_noise.csv (Радиошум)": "03_radio_noise.csv",
     }
-    selected_key = st.sidebar.selectbox("📂 Выберите датасет", list(dataset_options.keys()))
-    filename = dataset_options[selected_key]
-    records = parse_file(filename)
+    uploaded = st.sidebar.file_uploader("📥 Загрузить сохранённый лог (CSV)", type=["csv", "txt"])
+    selected_key = st.sidebar.selectbox("📂 …или выберите датасет", list(dataset_options.keys()))
+    if uploaded is not None:
+        filename = uploaded.name
+        records = parse_text(uploaded.getvalue().decode("utf-8-sig", errors="replace"))
+    else:
+        filename = dataset_options[selected_key]
+        records = parse_file(filename)
     if not records:
-        st.error(f"Не удалось загрузить файл {filename} из папки data/. Проверьте структуру репозитория.")
+        st.error(f"Не удалось загрузить {filename}. Проверьте файл (для датасетов — папку data/).")
         return
     st.sidebar.success(f"Загружено записей: {len(records)}")
 
@@ -253,12 +270,89 @@ def file_view():
         st.json({k: v for k, v in records[r_idx].items() if k != "raw"})
 
 
+# ---------------------------------------------------------------- команды и лог
+COMMANDS = {"Запрос статуса": "GET_STATUS", "Остановить маховик": "WHEEL_STOP", "Запустить маховик": "WHEEL_START"}
+
+
+def send_command(base_url, code):
+    """POST /command на источник. Возвращает (доставлено, ответ)."""
+    try:
+        req = urllib.request.Request(base_url + "/command", data=code.encode("utf-8"), method="POST",
+                                     headers={"Content-Type": "text/plain; charset=utf-8"})
+        with urllib.request.urlopen(req, timeout=8) as response:
+            return True, response.read().decode("utf-8", errors="replace").strip()[:200]
+    except urllib.error.HTTPError as e:
+        if e.code in (404, 501):
+            return False, "Источник не принимает команды (обновите telemetry_server.py на Render)"
+        return False, f"Ошибка {e.code}"
+    except Exception as e:
+        return False, f"Нет связи: {getattr(e, 'reason', None) or e}"
+
+
+def commands_tab(url):
+    init_live_state()
+    s = st.session_state
+    base = url.split("/telemetry")[0].rstrip("/")
+    st.caption("Команды отправляются на сервер телеметрии. Результат виден в телеметрии: "
+               "после «Остановить маховик» значение маховика становится 0.")
+    for label, code in COMMANDS.items():
+        if st.button(label, key="cmd_" + code):
+            ok, reply = send_command(base, code)
+            s.cmds.insert(0, {"время": time.strftime("%H:%M:%S"), "команда": label, "код": code,
+                              "результат": "✅ доставлена" if ok else "❌ не доставлена", "ответ": reply})
+            (st.success if ok else st.error)(f"{label}: {reply}")
+    if s.cmds:
+        st.markdown("**Журнал команд**")
+        st.dataframe(pd.DataFrame(s.cmds), hide_index=True)
+
+
+def build_report(lines):
+    """Разобранный отчёт (CSV) по списку сырых строк."""
+    rows = []
+    for i, r in enumerate(analyze([parse_telemetry_line(x) for x in lines]), 1):
+        if r["status"] == "CORRUPTED":
+            rows.append({"пакет": i, "статус": "CORRUPTED", "события": r["error"], "сырая строка": r["raw"]})
+            continue
+        row = {"пакет": i, "время": r["time_ms"], "статус": r["status"], "АКБ, В": r["battery_v"]}
+        row.update({f"СД{k + 1}": v for k, v in enumerate(r["light"])})
+        for key, names in (("accel", ("AX", "AY", "AZ")), ("gyro", ("GX", "GY", "GZ")), ("mag", ("MX", "MY", "MZ"))):
+            row.update({nm: round(r[key][k], 4) for k, nm in enumerate(names)})
+        row["МАХОВИК"] = r["flywheel"]
+        row["события"] = "; ".join(r["warnings"])
+        rows.append(row)
+    return pd.DataFrame(rows).to_csv(index=False).encode("utf-8-sig")
+
+
+def log_tab():
+    init_live_state()
+    s = st.session_state
+    st.write(f"В журнале: **{len(s.lv_log)}** принятых пакетов и **{len(s.cmds)}** команд.")
+    st.caption("Сохранённый лог можно открыть позже: режим «Файл» → «Загрузить сохранённый лог».")
+    if st.button("Подготовить файлы для скачивания"):
+        lines = list(s.lv_log)
+        s.export = {"raw": (HEADER + "\n" + "\n".join(lines) + "\n").encode("utf-8"),
+                    "report": build_report(lines),
+                    "cmds": pd.DataFrame(s.cmds).to_csv(index=False).encode("utf-8-sig") if s.cmds else b""}
+        st.success("Файлы готовы — скачайте ниже.")
+    if s.export:
+        st.download_button("⬇️ Сырой лог телеметрии (CSV)", s.export["raw"], "telemetry_log.csv", "text/csv")
+        st.download_button("⬇️ Разобранный отчёт (CSV)", s.export["report"], "telemetry_report.csv", "text/csv")
+        if s.export["cmds"]:
+            st.download_button("⬇️ Журнал команд (CSV)", s.export["cmds"], "commands_log.csv", "text/csv")
+
+
 # ---------------------------------------------------------------- выбор режима
 mode = st.sidebar.radio("Источник данных", ["Файл (датасет)", "Эмулятор (live)"])
 if mode == "Эмулятор (live)":
     url = st.sidebar.text_input("Адрес эмулятора", EMULATOR_URL)
     st.sidebar.caption("Другой сценарий: добавьте в адрес ?file=02_sensor_faults.csv "
                        "или ?file=03_radio_noise.csv")
-    live_view(url)
+    t_tel, t_cmd, t_log = st.tabs(["📡 Телеметрия", "🕹️ Команды", "💾 Лог"])
+    with t_tel:
+        live_view(url)
+    with t_cmd:
+        commands_tab(url)
+    with t_log:
+        log_tab()
 else:
     file_view()
