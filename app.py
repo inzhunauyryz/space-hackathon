@@ -12,7 +12,7 @@ st.title("🛰️ Центр Управления Полётами КА «Инт
 st.markdown("**Профессиональный комплекс мониторинга и анализа космической телеметрии**")
 st.markdown("---")
 
-EMULATOR_URL = "http://127.0.0.1:8765/telemetry"
+EMULATOR_URL = "https://space-telemetry-emulator.onrender.com/telemetry"
 STALL_SEC = 3.0   # столько секунд без новых пакетов = «передача прервана»
 
 
