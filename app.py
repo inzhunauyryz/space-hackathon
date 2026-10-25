@@ -7,7 +7,7 @@ from collections import deque
 import pandas as pd
 import streamlit as st
 
-from telemetry import (FAULT, MODULES, OK, WARN, SequenceChecker, analyze,
+from telemetry_core import (FAULT, MODULES, OK, WARN, SequenceChecker, analyze,
                        load_local_dataset, parse_telemetry_line)
 
 st.set_page_config(page_title="ЦУП ИнтроСат", page_icon="🛰️", layout="wide")
