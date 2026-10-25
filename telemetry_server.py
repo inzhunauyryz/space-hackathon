@@ -5,6 +5,10 @@
   /telemetry                      — кадр из файла по умолчанию (01_normal_flight.csv)
   /telemetry?file=02_sensor_faults.csv   — другой файл (сценарий)
 Формат ответа как у data-emulator: одна строка телеметрии, 204 — если данных нет.
+
+Команды (POST /command, тело — код команды):
+  GET_STATUS  — состояние сервера;  WHEEL_STOP / WHEEL_START — остановить / запустить маховик
+  (после WHEEL_STOP в телеметрии поле МАХОВИК становится 0).
 """
 import argparse
 import os
@@ -16,6 +20,30 @@ from urllib.parse import parse_qs, urlparse
 DATA_DIR = Path(__file__).with_name("data")
 ENCODINGS = ("utf-8-sig", "utf-8", "cp1251")
 _cache = {}   # имя файла -> (кадры, момент старта)
+STATE = {"wheel_stopped": False, "started": time.time()}
+
+
+def apply_state(frame):
+    """Применяет к кадру результат принятых команд (остановленный маховик)."""
+    if STATE["wheel_stopped"]:
+        parts = frame.split(";")
+        if len(parts) == 18:
+            parts[16] = "0"
+            return ";".join(parts)
+    return frame
+
+
+def run_command(code, default_file):
+    if code == "GET_STATUS":
+        wheel = "остановлен" if STATE["wheel_stopped"] else "работает"
+        return f"OK: файл {default_file}, маховик {wheel}, аптайм {int(time.time() - STATE['started'])} с"
+    if code == "WHEEL_STOP":
+        STATE["wheel_stopped"] = True
+        return "ACK: маховик остановлен (в телеметрии МАХОВИК = 0)"
+    if code == "WHEEL_START":
+        STATE["wheel_stopped"] = False
+        return "ACK: маховик запущен"
+    return None
 
 
 def read_frames(path):
@@ -74,7 +102,20 @@ def make_handler(default_file, interval):
                 return self._send(404, f"Нет такого файла: {name}\n".encode("utf-8"))
             if frame is None:
                 return self._send(204)
-            self._send(200, frame.encode("utf-8"))
+            self._send(200, apply_state(frame).encode("utf-8"))
+
+        def do_POST(self):
+            if urlparse(self.path).path != "/command":
+                return self._send(404, "Используйте POST /command\n".encode("utf-8"))
+            try:
+                length = min(int(self.headers.get("Content-Length", 0)), 200)
+            except ValueError:
+                length = 0
+            code = self.rfile.read(length).decode("utf-8", errors="replace").strip().upper()
+            reply = run_command(code, default_file)
+            if reply is None:
+                return self._send(400, f"Неизвестная команда: {code[:40]}\n".encode("utf-8"))
+            self._send(200, reply.encode("utf-8"))
 
         do_HEAD = do_GET
 
