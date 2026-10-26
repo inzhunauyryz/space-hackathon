@@ -1,12 +1,19 @@
 import html
+import math
 import re
 import time
 import urllib.error
 import urllib.request
 from collections import deque
 
+import numpy as np
 import pandas as pd
 import streamlit as st
+
+try:
+    import plotly.graph_objects as go
+except ImportError:   # 3D-вид необязателен: без plotly приложение работает как раньше
+    go = None
 
 from telemetry_core import (FAULT, MODULES, OK, WARN, SequenceChecker, analyze,
                        load_local_dataset, parse_telemetry_line)
@@ -63,6 +70,95 @@ def render_tiles(rec, link_level, link_text):
     for row in range(0, len(cards), 3):
         for col, card in zip(st.columns(3), cards[row:row + 3]):
             col.markdown(card, unsafe_allow_html=True)
+
+
+ADVICE = {
+    "power": "Проверьте заряд АКБ, при необходимости переведите КА в режим энергосбережения.",
+    "light": "Проверьте подключение датчиков света; ориентация по Солнцу может быть неточной.",
+    "imu": "Проверьте датчик положения; данные об ориентации могут быть недостоверны.",
+    "wheel": "Проверьте плату маховика и его управление.",
+    "mcu": "Проверьте микроконтроллер: возможен сбой времени или перезапуск.",
+    "link": "Проверьте канал связи: возможны помехи, часть пакетов повреждена.",
+}
+
+
+def render_summary(rec, link_level):
+    """Общее состояние КА одной строкой + рекомендации оператору."""
+    if rec is None or rec.get("modules") is None:
+        st.markdown(tile_html("Общее состояние КА", OK, "Ожидание данных", nodata=True), unsafe_allow_html=True)
+        return
+    levels = dict(rec["modules"], link=link_level)
+    worst = max(levels.values())
+    text = {OK: "Все системы в норме", WARN: "Есть отклонения — требуется внимание оператора",
+            FAULT: "Авария — требуется вмешательство оператора"}[worst]
+    st.markdown(tile_html("Общее состояние КА", worst, text), unsafe_allow_html=True)
+    names = dict(MODULES, link="Канал связи")
+    for key, lvl in levels.items():
+        if lvl > OK:
+            st.markdown(f"{'🔴' if lvl == FAULT else '🟡'} **{names[key]}:** {ADVICE[key]}")
+
+
+def attitude(rec):
+    """Крен, тангаж, курс (рад) по акселерометру и магнитометру."""
+    ax, ay, az = rec["accel"]
+    mx, my, mz = rec["mag"]
+    roll, pitch = math.atan2(ay, az), math.atan2(-ax, math.hypot(ay, az))
+    xh = mx * math.cos(pitch) + mz * math.sin(pitch)
+    yh = mx * math.sin(roll) * math.sin(pitch) + my * math.cos(roll) - mz * math.sin(roll) * math.cos(pitch)
+    return roll, pitch, math.atan2(-yh, xh)
+
+
+def sat_figure(rec):
+    """3D-модель спутника, повёрнутая по текущей ориентации."""
+    roll, pitch, yaw = attitude(rec)
+    cr, sr, cp, sp, cy, sy = (math.cos(roll), math.sin(roll), math.cos(pitch),
+                              math.sin(pitch), math.cos(yaw), math.sin(yaw))
+    rot = (np.array([[cy, -sy, 0], [sy, cy, 0], [0, 0, 1]]) @ np.array([[cp, 0, sp], [0, 1, 0], [-sp, 0, cp]])
+           @ np.array([[1, 0, 0], [0, cr, -sr], [0, sr, cr]]))
+    cube = np.array([[0, 0, 0], [0, 1, 0], [1, 1, 0], [1, 0, 0], [0, 0, 1], [0, 1, 1], [1, 1, 1], [1, 0, 1]], float)
+    p = ((cube - 0.5) * 1.6) @ rot.T
+    fig = go.Figure(go.Mesh3d(x=p[:, 0], y=p[:, 1], z=p[:, 2], i=[7, 0, 0, 0, 4, 4, 2, 6, 4, 0, 3, 7],
+                              j=[3, 4, 1, 2, 5, 6, 5, 2, 0, 1, 6, 4], k=[0, 7, 2, 3, 6, 7, 1, 1, 5, 5, 7, 6],
+                              color="#5b7fa6", opacity=0.9, flatshading=True))
+    for axis, color, name in ((0, "#d62839", "X"), (1, "#1f9d55", "Y"), (2, "#2a6fdb", "Z")):
+        e = rot[:, axis] * 1.6
+        fig.add_trace(go.Scatter3d(x=[0, e[0]], y=[0, e[1]], z=[0, e[2]], mode="lines+text",
+                                   line=dict(color=color, width=7), text=["", name], showlegend=False))
+    axis_cfg = dict(range=[-2, 2], showticklabels=False, title="")
+    fig.update_layout(height=320, margin=dict(l=0, r=0, t=0, b=0), uirevision="keep",
+                      scene=dict(xaxis=axis_cfg, yaxis=axis_cfg, zaxis=axis_cfg, aspectmode="cube"))
+    return fig, tuple(math.degrees(a) for a in (roll, pitch, yaw))
+
+
+def render_attitude(rec, key):
+    st.subheader("Ориентация КА")
+    roll, pitch, yaw = (math.degrees(a) for a in attitude(rec))
+    st.write(f"Крен: **{roll:.0f}°** · Тангаж: **{pitch:.0f}°** · Курс: **{yaw:.0f}°** "
+             "(ориентировочно, по акселерометру и магнитометру)")
+    if go is None:
+        st.info("3D-вид недоступен: добавьте plotly в requirements.txt")
+        return
+    fig, _ = sat_figure(rec)
+    st.plotly_chart(fig, key="att3d_" + key)
+
+
+def render_stats(recs, title):
+    """Таблица мин / макс / среднее по параметрам."""
+    if not recs:
+        st.info("Пока нет данных для статистики.")
+        return
+    st.caption(title)
+    series = {"АКБ, В": [r["battery_v"] for r in recs]}
+    series.update({f"СД{i + 1}": [r["light"][i] for r in recs] for i in range(4)})
+    for key, names in (("accel", "AX AY AZ"), ("gyro", "GX GY GZ"), ("mag", "MX MY MZ")):
+        series.update({nm: [r[key][i] for r in recs] for i, nm in enumerate(names.split())})
+    series["МАХОВИК"] = [r["flywheel"] for r in recs]
+    rows = []
+    for name, vals in series.items():
+        v = pd.Series(vals)
+        rows.append({"параметр": name, "сейчас": round(v.iloc[-1], 3), "мин": round(v.min(), 3),
+                     "макс": round(v.max(), 3), "среднее": round(v.mean(), 3)})
+    st.dataframe(pd.DataFrame(rows), hide_index=True)
 
 
 def render_frame(current):
@@ -134,7 +230,7 @@ def init_live_state():
     defaults = {"lv_raw": None, "lv_rx": None, "lv_rec": None, "lv_valid": None,
                 "lv_hist": deque(maxlen=600), "lv_status": deque(maxlen=30), "lv_counts": {},
                 "lv_events": [], "lv_sig": None, "lv_checker": SequenceChecker(), "lv_seq": 0,
-                "lv_log": deque(maxlen=50000), "cmds": [], "export": None}
+                "lv_log": deque(maxlen=50000), "cmds": [], "export": None, "lv_modcnt": {}}
     for key, default in defaults.items():
         s.setdefault(key, default)
 
@@ -144,6 +240,7 @@ def live_view(url):
     init_live_state()
     s = st.session_state
     error = None
+    new_fault = None
     for _ in range(8):                      # несколько запросов за секунду, чтобы не терять пакеты
         raw, error = fetch_frame(url)
         if error:
@@ -157,6 +254,9 @@ def live_view(url):
                 rec.pop("n", None)
                 s.lv_valid = rec
                 s.lv_hist.append(rec)
+                for m, lvl in rec["modules"].items():
+                    if lvl > OK:
+                        s.lv_modcnt[MODULES[m]] = s.lv_modcnt.get(MODULES[m], 0) + 1
             s.lv_rec = rec
             s.lv_status.append(rec["status"])
             s.lv_counts[rec["status"]] = s.lv_counts.get(rec["status"], 0) + 1
@@ -167,11 +267,15 @@ def live_view(url):
                     s.lv_events.insert(0, {"время": time.strftime("%H:%M:%S"), "пакет": s.lv_seq,
                                            "статус": rec["status"], "событие": "; ".join(texts)})
                     del s.lv_events[200:]
+                    if rec["status"] == "FAULT":
+                        new_fault = texts[0]
                 s.lv_sig = sig
             else:
                 s.lv_sig = None
         time.sleep(0.1)
 
+    if new_fault:
+        st.toast(f"🔴 АВАРИЯ: {new_fault}")
     age = None if s.lv_rx is None else time.time() - s.lv_rx
     if error:
         st.error(f"🔴 НЕТ СВЯЗИ С ЭМУЛЯТОРОМ: {error}. Приложение повторяет попытку каждую секунду.")
@@ -186,9 +290,12 @@ def live_view(url):
                " · ".join(f"{k}: {v}" for k, v in sorted(c.items())))
 
     link_level, link_text = link_state(list(s.lv_status))
-    tab_panel, tab_charts, tab_events = st.tabs(["🎛️ Пульт", "📈 Графики", "📋 События"])
+    tab_panel, tab_charts, tab_stats, tab_events = st.tabs(["🎛️ Пульт", "📈 Графики", "📊 Статистика", "📋 События"])
     with tab_panel:
+        render_summary(s.lv_valid, link_level)
         render_tiles(s.lv_valid, link_level, link_text)
+        if s.lv_valid is not None:
+            render_attitude(s.lv_valid, "live")
         if s.lv_rec is not None and s.lv_rec["status"] == "CORRUPTED":
             st.error(f"❌ Последний пакет повреждён: {s.lv_rec['error']}")
         if s.lv_valid is not None:
@@ -197,6 +304,11 @@ def live_view(url):
             st.info("Данных пока нет.")
     with tab_charts:
         render_charts(list(s.lv_hist))
+    with tab_stats:
+        render_stats(list(s.lv_hist), "Статистика по последним 600 пакетам.")
+        if s.lv_modcnt:
+            st.markdown("**Пакеты с отклонениями по модулям (с начала сеанса)**")
+            st.bar_chart(pd.Series(s.lv_modcnt))
     with tab_events:
         if s.lv_events:
             st.dataframe(pd.DataFrame(s.lv_events), hide_index=True)
@@ -221,6 +333,23 @@ def parse_file(filename):
     return analyze([parse_telemetry_line(str(x)) for x in df.iloc[:, 0]])
 
 
+@st.cache_resource(show_spinner=False)
+def file_summary(key, _records):
+    """Аномалии по модулям и таймлайн аномалий по всему файлу (считается один раз)."""
+    per_module = {name: 0 for name in MODULES.values()}
+    flags = []
+    for r in _records:
+        flags.append(r["status"] != "NORMAL")
+        if r.get("modules"):
+            for m, lvl in r["modules"].items():
+                if lvl > OK:
+                    per_module[MODULES[m]] += 1
+    size = max(1, len(flags) // 60)
+    timeline = pd.Series(flags).groupby(pd.Series(range(len(flags))) // size).sum()
+    timeline.index = [i * size for i in timeline.index]
+    return pd.Series(per_module), timeline
+
+
 def file_view():
     dataset_options = {
         "01_normal_flight.csv (Штатный полет)": "01_normal_flight.csv",
@@ -240,18 +369,30 @@ def file_view():
         return
     st.sidebar.success(f"Загружено записей: {len(records)}")
 
-    tab_panel, tab_charts, tab_events, tab_raw = st.tabs(
-        ["🎛️ Пульт", "📈 Графики", "📋 События", "💻 Сырые данные"])
+    tab_panel, tab_charts, tab_stats, tab_events, tab_raw = st.tabs(
+        ["🎛️ Пульт", "📈 Графики", "📊 Статистика", "📋 События", "💻 Сырые данные"])
     with tab_panel:
         idx = st.slider("Выбор кадра телеметрии", 0, len(records) - 1, 0)
         rec = records[idx]
         window = records[max(0, idx - 15): idx + 16]
         link_level, link_text = link_state([r["status"] for r in window])
-        render_tiles(rec if rec["status"] != "CORRUPTED" else None, link_level, link_text)
+        shown = rec if rec["status"] != "CORRUPTED" else None
+        render_summary(shown, link_level)
+        render_tiles(shown, link_level, link_text)
+        if shown is not None:
+            render_attitude(shown, "file")
         render_frame(rec)
     with tab_charts:
         st.caption("Графики — последние 600 пакетов до выбранного кадра.")
         render_charts([r for r in records[max(0, idx - 600): idx + 1] if r["status"] != "CORRUPTED"])
+    with tab_stats:
+        render_stats([r for r in records[max(0, idx - 600): idx + 1] if r["status"] != "CORRUPTED"],
+                     "Статистика по 600 пакетам до выбранного кадра.")
+        per_module, timeline = file_summary(f"{filename}:{len(records)}:{records[0].get('raw', '')[:30]}", records)
+        st.markdown("**Пакеты с отклонениями по модулям (весь файл)**")
+        st.bar_chart(per_module)
+        st.markdown("**Где в файле происходят аномалии** (число аномальных пакетов по участкам файла)")
+        st.bar_chart(timeline)
     with tab_events:
         counts = pd.Series([r["status"] for r in records]).value_counts()
         st.markdown("**Состояние пакетов во всём файле:**")
