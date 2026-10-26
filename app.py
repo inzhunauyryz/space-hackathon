@@ -411,6 +411,18 @@ def file_view():
         st.json({k: v for k, v in records[r_idx].items() if k != "raw"})
 
 
+SCENARIOS = {"01 — штатный полёт": "01_normal_flight.csv",
+             "02 — сбои датчиков": "02_sensor_faults.csv",
+             "03 — радиошум": "03_radio_noise.csv"}
+
+
+def reset_live_state():
+    """Сбрасывает накопленные данные live-режима (журнал команд сохраняется)."""
+    for key in [k for k in st.session_state.keys() if k.startswith("lv_")]:
+        del st.session_state[key]
+    st.session_state["export"] = None
+
+
 # ---------------------------------------------------------------- команды и лог
 COMMANDS = {"Запрос статуса": "GET_STATUS", "Остановить маховик": "WHEEL_STOP", "Запустить маховик": "WHEEL_START"}
 
@@ -486,8 +498,15 @@ def log_tab():
 mode = st.sidebar.radio("Источник данных", ["Файл (датасет)", "Эмулятор (live)"])
 if mode == "Эмулятор (live)":
     url = st.sidebar.text_input("Адрес эмулятора", EMULATOR_URL)
-    st.sidebar.caption("Другой сценарий: добавьте в адрес ?file=02_sensor_faults.csv "
-                       "или ?file=03_radio_noise.csv")
+    scenario = st.sidebar.selectbox("Сценарий данных", list(SCENARIOS.keys()))
+    if "?" not in url:                      # сценарий выбирается параметром ?file=
+        url = f"{url}?file={SCENARIOS[scenario]}"
+    if st.session_state.get("lv_url") != url:   # сменился адрес или сценарий — начинаем с чистого листа
+        reset_live_state()
+        st.session_state["lv_url"] = url
+    if st.sidebar.button("🔄 Сбросить данные"):
+        reset_live_state()
+        st.session_state["lv_url"] = url
     t_tel, t_cmd, t_log = st.tabs(["📡 Телеметрия", "🕹️ Команды", "💾 Лог"])
     with t_tel:
         live_view(url)
