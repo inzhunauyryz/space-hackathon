@@ -350,6 +350,23 @@ def file_summary(key, _records):
     return pd.Series(per_module), timeline
 
 
+@st.cache_resource(show_spinner=False)
+def event_types(key, _records):
+    """Сводка типов аномалий: сколько пакетов, первый пакет, пример сырой строки."""
+    groups = {}
+    for i, r in enumerate(_records):
+        if r["status"] == "NORMAL":
+            continue
+        for text in ([r["error"]] if r.get("error") else r["warnings"]):
+            kind = re.sub(r"-?\d+(\.\d+)?", "#", text)
+            if kind in groups:
+                groups[kind]["пакетов"] += 1
+            else:
+                groups[kind] = {"тип аномалии": kind, "пакетов": 1, "первый пакет": i,
+                                "статус": r["status"], "пример строки": r["raw"][:120]}
+    return sorted(groups.values(), key=lambda g: -g["пакетов"])
+
+
 def file_view():
     dataset_options = {
         "01_normal_flight.csv (Штатный полет)": "01_normal_flight.csv",
@@ -400,6 +417,10 @@ def file_view():
         bad = [{"пакет": i, "статус": r["status"],
                 "событие": r.get("error") or "; ".join(r["warnings"])}
                for i, r in enumerate(records) if r["status"] != "NORMAL"]
+        types = event_types(f"{filename}:{len(records)}:{records[0].get('raw', '')[:30]}", records)
+        if types:
+            st.markdown("**Типы аномалий** (сколько пакетов, первый пакет, пример строки)")
+            st.dataframe(pd.DataFrame(types), hide_index=True)
         st.markdown(f"**Аномалии: {len(bad)} из {len(records)} пакетов** (показаны первые 500)")
         if bad:
             st.dataframe(pd.DataFrame(bad[:500]), hide_index=True)
