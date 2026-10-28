@@ -383,11 +383,11 @@ def file_view():
             render_attitude(shown, "file")
         render_frame(rec)
     with tab_charts:
-        st.caption("Графики — последние 600 пакетов до выбранного кадра.")
-        render_charts([r for r in records[max(0, idx - 600): idx + 1] if r["status"] != "CORRUPTED"])
+        st.caption("Графики — 600 пакетов вокруг выбранного кадра.")
+        render_charts([r for r in records[max(0, idx - 300): idx + 301] if r["status"] != "CORRUPTED"])
     with tab_stats:
-        render_stats([r for r in records[max(0, idx - 600): idx + 1] if r["status"] != "CORRUPTED"],
-                     "Статистика по 600 пакетам до выбранного кадра.")
+        render_stats([r for r in records[max(0, idx - 300): idx + 301] if r["status"] != "CORRUPTED"],
+                     "Статистика по 600 пакетам вокруг выбранного кадра.")
         per_module, timeline = file_summary(f"{filename}:{len(records)}:{records[0].get('raw', '')[:30]}", records)
         st.markdown("**Пакеты с отклонениями по модулям (весь файл)**")
         st.bar_chart(per_module)
