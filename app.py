@@ -49,15 +49,23 @@ def tile_html(name, level, sub, nodata=False):
             f'<div class="lv">{label}</div><div class="sub">{html.escape(sub)}</div></div>')
 
 
+def num(x, spec=".2f", suffix=""):
+    """Число для отображения; если данных нет (датчик отключён) — «н/д»."""
+    if x is None or (isinstance(x, float) and math.isnan(x)):
+        return "н/д"
+    return format(x, spec) + suffix
+
+
 def render_tiles(rec, link_level, link_text):
     """Плитки статусов модулей: зелёный — норма, жёлтый — внимание, красный — авария."""
     valid = rec is not None and rec.get("modules") is not None
     values = {}
     if valid:
         a = rec["accel"]
-        values = {"mcu": f"t = {rec['time_ms']}", "power": f"{rec['battery_v']:.2f} В",
-                  "imu": f"|a| = {(a[0] ** 2 + a[1] ** 2 + a[2] ** 2) ** 0.5:.2f} g",
-                  "light": " · ".join(str(v) for v in rec["light"]), "wheel": f"{rec['flywheel']:+d}"}
+        mod = (a[0] ** 2 + a[1] ** 2 + a[2] ** 2) ** 0.5   # NaN, если нет данных
+        values = {"mcu": "t = " + ("н/д" if rec["time_ms"] is None else str(rec["time_ms"])),
+                  "power": num(rec["battery_v"], ".2f", " В"), "imu": "|a| = " + num(mod, ".2f", " g"),
+                  "light": " · ".join(num(v, ".0f") for v in rec["light"]), "wheel": num(rec["flywheel"], "+.0f")}
     cards = []
     for key, name in MODULES.items():
         if not valid:
@@ -132,6 +140,9 @@ def sat_figure(rec):
 
 def render_attitude(rec, key):
     st.subheader("Ориентация КА")
+    if any(math.isnan(v) for v in rec["accel"] + rec["mag"]):
+        st.info("Ориентация недоступна: нет данных датчика положения.")
+        return
     roll, pitch, yaw = (math.degrees(a) for a in attitude(rec))
     st.write(f"Крен: **{roll:.0f}°** · Тангаж: **{pitch:.0f}°** · Курс: **{yaw:.0f}°** "
              "(ориентировочно, по акселерометру и магнитометру)")
@@ -165,9 +176,9 @@ def render_frame(current):
     """Метрики одного пакета: гироскоп, магнитометр, свет."""
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("Статус пакета", current.get("status", "UNKNOWN"))
-    col2.metric("Напряжение АКБ", f"{current.get('battery_v', 0):.2f} В")
-    col3.metric("Маховик", f"{current.get('flywheel', 0)}")
-    col4.metric("Ускорение Z", f"{current.get('accel', [0, 0, 0])[2]:.2f} g")
+    col2.metric("Напряжение АКБ", num(current.get("battery_v"), ".2f", " В"))
+    col3.metric("Маховик", num(current.get("flywheel"), ".0f"))
+    col4.metric("Ускорение Z", num(current.get("accel", [None] * 3)[2], ".2f", " g"))
     if current.get("error"):
         st.error(f"❌ Повреждённый пакет: {current['error']}")
     if current.get("warnings"):
@@ -175,12 +186,12 @@ def render_frame(current):
     col_g, col_m = st.columns(2)
     with col_g:
         st.subheader("Гироскоп (°/с)")
-        g = current.get("gyro", [0, 0, 0])
-        st.write(f"GX: {g[0]:.2f} | GY: {g[1]:.2f} | GZ: {g[2]:.2f}")
+        g = current.get("gyro", [None] * 3)
+        st.write(f"GX: {num(g[0])} | GY: {num(g[1])} | GZ: {num(g[2])}")
     with col_m:
         st.subheader("Магнитометр (Гс)")
-        m = current.get("mag", [0, 0, 0])
-        st.write(f"MX: {m[0]:.2f} | MY: {m[1]:.2f} | MZ: {m[2]:.2f}")
+        m = current.get("mag", [None] * 3)
+        st.write(f"MX: {num(m[0])} | MY: {num(m[1])} | MZ: {num(m[2])}")
     st.subheader("Освещенность (СД1 - СД4)")
     st.bar_chart(pd.DataFrame({"Уровень": current.get("light", [0, 0, 0, 0])},
                               index=["СД1", "СД2", "СД3", "СД4"]))
@@ -250,8 +261,9 @@ def live_view(url):
             s.lv_log.append(raw.strip())   # журнал принятых пакетов (как есть)
             rec = parse_telemetry_line(raw)
             if rec["status"] != "CORRUPTED":
-                s.lv_checker.apply(rec)
+                s.lv_checker.apply(rec)      # может переклассифицировать пакет (шум или отказ датчика)
                 rec.pop("n", None)
+            if rec["status"] != "CORRUPTED":
                 s.lv_valid = rec
                 s.lv_hist.append(rec)
                 for m, lvl in rec["modules"].items():
