@@ -24,7 +24,15 @@ JUMP_IMU = 16384                # скачок между соседними п�
 JUMP_LIGHT = 32768
 TIME_JUMP_X = 10                # скачок времени больше 10 обычных шагов
 
+NONNUM_N = 5                    # поле нечисловое столько пакетов подряд = отказ датчика (иначе шум)
+MAX_BAD_FIELDS = 8              # нечисловых полей больше — пакет считается мусором
+
 OK, WARN, FAULT = 0, 1, 2
+NAN = float("nan")
+FIELD_NAMES = ["ПРЕАМБУЛА", "ВРЕМЯ", "АКБ", "СД1", "СД2", "СД3", "СД4", "AX", "AY", "AZ",
+               "GX", "GY", "GZ", "MX", "MY", "MZ", "МАХОВИК", "ПОСТАМБУЛА"]
+FIELD_MODULE = {1: "mcu", 2: "power", **{i: "light" for i in range(3, 7)},
+                **{i: "imu" for i in range(7, 16)}, 16: "wheel"}
 MODULES = {"mcu": "Микроконтроллер", "power": "Питание", "imu": "Датчик положения",
            "light": "Датчики света", "wheel": "Плата маховика"}
 
@@ -75,8 +83,15 @@ def _corrupted(line, error):
             "issues": [("link", FAULT, error)], "warnings": []}
 
 
+def _div(x, k):
+    return NAN if x is None else x / k
+
+
 def parse_telemetry_line(line):
-    """Разбор и проверка одной строки. Статусы: NORMAL, WARNING, FAULT, CORRUPTED."""
+    """Разбор и проверка одной строки. Статусы: NORMAL, WARNING, FAULT, CORRUPTED.
+
+    Пакет с нечисловыми полями получает временный статус PARTIAL: окончательно его
+    классифицирует SequenceChecker (шум в канале или отказ датчика)."""
     if not isinstance(line, str):
         line = str(line)
     parts = [p.strip() for p in line.strip().split(";")]
@@ -84,9 +99,6 @@ def parse_telemetry_line(line):
         parts.pop()
     if len(parts) != N_FIELDS:
         return _corrupted(line, f"Неверное число полей: {len(parts)} вместо {N_FIELDS}")
-    bad = [i for i in range(1, 17) if not _INT.match(parts[i])]
-    if bad:
-        return _corrupted(line, f"Нечисловые значения в полях: {bad[:5]}")
 
     preamble, postamble = parts[0], parts[17]
     _learn_markers(preamble, postamble)
@@ -95,45 +107,56 @@ def parse_telemetry_line(line):
     if not postamble or (_expected["post"] is not None and postamble != _expected["post"]):
         return _corrupted(line, "Повреждена постамбула")
 
-    n = [int(p) for p in parts[1:17]]   # t, akb, sd1-4, ax ay az, gx gy gz, mx my mz, wheel
-    time_ms, akb, light = n[0], n[1], n[2:6]
+    bad = [i for i in range(1, 17) if not _INT.match(parts[i])]
+    if len(bad) > MAX_BAD_FIELDS:
+        return _corrupted(line, "Нечисловые значения: " + ", ".join(FIELD_NAMES[i] for i in bad[:4]) + " …")
+    # n: t, akb, sd1-4, ax ay az, gx gy gz, mx my mz, wheel (None — поле нечисловое)
+    n = [None if i in bad else int(parts[i]) for i in range(1, 17)]
+    time_ms, akb, light_raw = n[0], n[1], n[2:6]
     acc_raw, gyr_raw, mag_raw, flywheel = n[6:9], n[9:12], n[12:15], n[15]
-    battery_v = akb / 1000.0
-    accel = [a / 16384.0 for a in acc_raw]
-    gyro = [g / 131.072 for g in gyr_raw]
-    mag = [m / 1711.6 for m in mag_raw]
+    battery_v = _div(akb, 1000.0)
+    light = [NAN if v is None else v for v in light_raw]
+    accel = [_div(a, 16384.0) for a in acc_raw]
+    gyro = [_div(g, 131.072) for g in gyr_raw]
+    mag = [_div(m, 1711.6) for m in mag_raw]
 
     issues = []
     add = lambda m, lvl, txt: issues.append((m, lvl, txt))
 
-    if time_ms < 0:
+    if time_ms is not None and time_ms < 0:
         add("mcu", FAULT, "Отрицательное время пакета")
-    if akb <= 0:
-        add("power", FAULT, "Нет напряжения АКБ")
-    else:
-        cells = _battery_cells(battery_v)
-        if not CELL_FAULT[0] * cells <= battery_v <= CELL_FAULT[1] * cells:
-            add("power", FAULT, f"Напряжение АКБ {battery_v:.2f} В — критично")
-        elif not CELL_WARN[0] * cells <= battery_v <= CELL_WARN[1] * cells:
-            add("power", WARN, f"Напряжение АКБ вне нормы: {battery_v:.2f} В")
-    if any(v < 0 or v > 65535 for v in light):
+    if akb is not None:
+        if akb <= 0:
+            add("power", FAULT, "Нет напряжения АКБ")
+        else:
+            cells = _battery_cells(battery_v)
+            if not CELL_FAULT[0] * cells <= battery_v <= CELL_FAULT[1] * cells:
+                add("power", FAULT, f"Напряжение АКБ {battery_v:.2f} В — критично")
+            elif not CELL_WARN[0] * cells <= battery_v <= CELL_WARN[1] * cells:
+                add("power", WARN, f"Напряжение АКБ вне нормы: {battery_v:.2f} В")
+    lv = [v for v in light_raw if v is not None]
+    if any(v < 0 or v > 65535 for v in lv):
         add("light", FAULT, "Датчик света: значение вне диапазона 0…65535")
-    elif any(v == 65535 for v in light):
+    elif any(v == 65535 for v in lv):
         add("light", WARN, "Датчик света: насыщение")
     for name, raw in (("Акселерометр", acc_raw), ("Гироскоп", gyr_raw), ("Магнитометр", mag_raw)):
-        if any(v < -32768 or v > 32767 for v in raw):
+        vals = [v for v in raw if v is not None]
+        if any(v < -32768 or v > 32767 for v in vals):
             add("imu", FAULT, f"{name}: значение вне диапазона int16")
-        elif any(v in (-32768, 32767) for v in raw):
+        elif any(v in (-32768, 32767) for v in vals):
             add("imu", WARN, f"{name}: насыщение (граничное значение)")
-    if any(abs(m) > 16.0 for m in mag):
+    if any(abs(m) > 16.0 for m in mag if not math.isnan(m)):
         add("imu", FAULT, "Превышение магнитного поля (>16 Гс)")
-    if flywheel < -32768 or flywheel > 32767:
+    if flywheel is not None and (flywheel < -32768 or flywheel > 32767):
         add("wheel", FAULT, "Маховик: значение вне диапазона int16")
 
     rec = {"preamble": preamble, "time_ms": time_ms, "battery_v": battery_v, "light": light,
-           "accel": accel, "gyro": gyro, "mag": mag, "flywheel": flywheel,
-           "raw": line, "n": n, "issues": issues}
-    return finalize(rec)
+           "accel": accel, "gyro": gyro, "mag": mag, "flywheel": NAN if flywheel is None else flywheel,
+           "raw": line, "n": n, "issues": issues, "missing": bad}
+    finalize(rec)
+    if bad:
+        rec["status"] = "PARTIAL"
+    return rec
 
 
 class SequenceChecker:
@@ -143,7 +166,7 @@ class SequenceChecker:
 
     def __init__(self):
         self.last_t, self.cand, self.dts = None, None, deque(maxlen=50)
-        self.prev, self.same = None, {}
+        self.prev, self.same, self.bad_run = None, {}, {}
 
     def _run(self, key, val):
         last, cnt = self.same.get(key, (None, 0))
@@ -156,10 +179,23 @@ class SequenceChecker:
             return rec
         n, issues = rec["n"], rec["issues"]
         add = lambda m, lvl, txt: issues.append((m, lvl, txt))
-        t = n[0]
+
+        # нечисловые поля: редкие — шум в канале, постоянные — отказ датчика
+        missing = set(rec.get("missing", ()))
+        for f in range(1, 17):
+            self.bad_run[f] = self.bad_run.get(f, 0) + 1 if f in missing else 0
+        if missing:
+            if any(self.bad_run[f] < NONNUM_N for f in missing):
+                raw = rec["raw"]
+                rec.clear()
+                rec.update(_corrupted(raw, "Нечисловые значения: " + ", ".join(FIELD_NAMES[f] for f in sorted(missing))))
+                return rec
+            for f in sorted(missing):
+                add(FIELD_MODULE[f], FAULT, f"{FIELD_NAMES[f]}: нет данных (датчик отключён или неисправен)")
 
         # время
-        if t >= 0:
+        t = n[0]
+        if t is not None and t >= 0:
             if self.last_t is None:
                 self.last_t = t
             else:
@@ -182,7 +218,7 @@ class SequenceChecker:
         # датчики света: нули и залипание
         for i in range(4):
             x = n[2 + i]
-            if not 0 <= x <= 65535:
+            if x is None or not 0 <= x <= 65535:
                 self.same.pop(f"sd{i}", None)
                 continue
             cnt = self._run(f"sd{i}", x)
@@ -194,7 +230,7 @@ class SequenceChecker:
         # датчик положения: нули и залипание по группам
         for title, sl in (("Акселерометр", slice(6, 9)), ("Гироскоп", slice(9, 12)), ("Магнитометр", slice(12, 15))):
             tup = tuple(n[sl])
-            if all(-32768 <= v <= 32767 for v in tup):
+            if all(v is not None and -32768 <= v <= 32767 for v in tup):
                 cnt = self._run(title, tup)
                 if not any(tup) and cnt >= ZERO_N:
                     add("imu", FAULT if cnt >= ZERO_FAULT_N else WARN, f"{title}: нет сигнала (отключён?)")
@@ -205,10 +241,10 @@ class SequenceChecker:
 
         # резкие скачки относительно предыдущего пакета («хаотичные данные»)
         if self.prev:
-            jl = [i + 1 for i in range(4) if 0 <= n[2 + i] <= 65535 and 0 <= self.prev[2 + i] <= 65535
-                  and abs(n[2 + i] - self.prev[2 + i]) > JUMP_LIGHT]
-            ji = [j for j in range(6, 15) if abs(n[j]) <= 32768 and abs(self.prev[j]) <= 32768
-                  and abs(n[j] - self.prev[j]) > JUMP_IMU]
+            def pair(j, lo, hi):
+                return n[j] is not None and self.prev[j] is not None and lo <= n[j] <= hi and lo <= self.prev[j] <= hi
+            jl = [i + 1 for i in range(4) if pair(2 + i, 0, 65535) and abs(n[2 + i] - self.prev[2 + i]) > JUMP_LIGHT]
+            ji = [j for j in range(6, 15) if pair(j, -32768, 32767) and abs(n[j] - self.prev[j]) > JUMP_IMU]
             if jl:
                 add("light", WARN, "Резкий скачок: " + ", ".join(f"СД{k}" for k in jl))
             if ji:
