@@ -405,9 +405,12 @@ def file_view():
             st.session_state["frame_idx"], st.session_state["frame_file"] = 0, (filename, len(records))
         st.session_state["frame_idx"] = min(st.session_state.get("frame_idx", 0), len(records) - 1)
         cur = st.session_state["frame_idx"]
-        anomalies = [i for i, r in enumerate(records) if r["status"] != "NORMAL"]
-        prev_a = next((i for i in reversed(anomalies) if i < cur), None)
-        next_a = next((i for i in anomalies if i > cur), None)
+        # начала участков аномалий: пакет не в норме, а предыдущий в норме
+        starts = [i for i, r in enumerate(records)
+                  if r["status"] != "NORMAL" and (i == 0 or records[i - 1]["status"] == "NORMAL")]
+        prev_a = next((i for i in reversed(starts) if i < cur), None)
+        next_a = next((i for i in starts if i > cur), None)
+        last = len(records) - 1
 
         def goto(i):
             st.session_state["frame_idx"] = i
@@ -416,6 +419,11 @@ def file_view():
         b1.button("⏮ В начало", on_click=goto, args=(0,))
         b2.button("◀ Пред. аномалия", on_click=goto, args=(prev_a,), disabled=prev_a is None)
         b3.button("След. аномалия ▶", on_click=goto, args=(next_a,), disabled=next_a is None)
+        c1, c2, c3, c4 = st.columns(4)
+        c1.button("−5000", on_click=goto, args=(max(0, cur - 5000),))
+        c2.button("−500", on_click=goto, args=(max(0, cur - 500),))
+        c3.button("+500", on_click=goto, args=(min(last, cur + 500),))
+        c4.button("+5000", on_click=goto, args=(min(last, cur + 5000),))
         idx = st.slider("Выбор кадра телеметрии", 0, len(records) - 1, key="frame_idx")
         rec = records[idx]
         window = records[max(0, idx - 15): idx + 16]
