@@ -401,7 +401,22 @@ def file_view():
     tab_panel, tab_charts, tab_stats, tab_events, tab_raw = st.tabs(
         ["🎛️ Пульт", "📈 Графики", "📊 Статистика", "📋 События", "💻 Сырые данные"])
     with tab_panel:
-        idx = st.slider("Выбор кадра телеметрии", 0, len(records) - 1, 0)
+        if st.session_state.get("frame_file") != (filename, len(records)):   # сменился файл — начинаем с начала
+            st.session_state["frame_idx"], st.session_state["frame_file"] = 0, (filename, len(records))
+        st.session_state["frame_idx"] = min(st.session_state.get("frame_idx", 0), len(records) - 1)
+        cur = st.session_state["frame_idx"]
+        anomalies = [i for i, r in enumerate(records) if r["status"] != "NORMAL"]
+        prev_a = next((i for i in reversed(anomalies) if i < cur), None)
+        next_a = next((i for i in anomalies if i > cur), None)
+
+        def goto(i):
+            st.session_state["frame_idx"] = i
+
+        b1, b2, b3 = st.columns(3)
+        b1.button("⏮ В начало", on_click=goto, args=(0,))
+        b2.button("◀ Пред. аномалия", on_click=goto, args=(prev_a,), disabled=prev_a is None)
+        b3.button("След. аномалия ▶", on_click=goto, args=(next_a,), disabled=next_a is None)
+        idx = st.slider("Выбор кадра телеметрии", 0, len(records) - 1, key="frame_idx")
         rec = records[idx]
         window = records[max(0, idx - 15): idx + 16]
         link_level, link_text = link_state([r["status"] for r in window])
