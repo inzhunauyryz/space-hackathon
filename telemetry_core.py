@@ -12,7 +12,11 @@ N_FIELDS = 18
 _INT = re.compile(r"^-?\d+$")
 
 # ---- ПОРОГИ (при необходимости подстройте под штатный полёт 01_normal_flight.csv) ----
-BATT_MIN, BATT_MAX = 3.2, 4.3   # В, вне диапазона — «внимание»
+# Напряжение АКБ: пороги заданы НА ОДНУ ЯЧЕЙКУ, число ячеек определяется по начальному
+# напряжению (8.4 В -> 2 ячейки). Пороги предварительные, в документации норм нет.
+CELL_WARN = (3.3, 4.3)          # В на ячейку: вне диапазона — «внимание»
+CELL_FAULT = (3.0, 4.5)         # В на ячейку: вне диапазона — «авария»
+CELL_NOMINAL = 3.7              # типичное напряжение ячейки для определения их числа
 ZERO_N = 15                     # столько пакетов подряд нули = «внимание»
 ZERO_FAULT_N = 150              # столько пакетов подряд нули = «авария» (отказ датчика)
 STUCK_N = 60                    # столько пакетов подряд без изменений = «внимание»
@@ -27,6 +31,16 @@ MODULES = {"mcu": "Микроконтроллер", "power": "Питание", "
 # Маркеры преамбулы/постамбулы определяются по первым пакетам (самое частое значение)
 _seen = {"pre": Counter(), "post": Counter(), "n": 0}
 _expected = {"pre": None, "post": None}
+_batt = {"hist": [], "cells": None}   # число ячеек АКБ (по медиане первых 20 пакетов)
+
+
+def _battery_cells(u):
+    if _batt["cells"] is None:
+        if u > 0:
+            _batt["hist"].append(u)
+        if len(_batt["hist"]) >= 20:
+            _batt["cells"] = max(1, round(median(_batt["hist"]) / CELL_NOMINAL))
+    return _batt["cells"] or max(1, round(u / CELL_NOMINAL))
 
 
 def _learn_markers(pre, post):
@@ -96,8 +110,12 @@ def parse_telemetry_line(line):
         add("mcu", FAULT, "Отрицательное время пакета")
     if akb <= 0:
         add("power", FAULT, "Нет напряжения АКБ")
-    elif battery_v < BATT_MIN or battery_v > BATT_MAX:
-        add("power", WARN, f"Напряжение АКБ вне нормы: {battery_v:.2f} В")
+    else:
+        cells = _battery_cells(battery_v)
+        if not CELL_FAULT[0] * cells <= battery_v <= CELL_FAULT[1] * cells:
+            add("power", FAULT, f"Напряжение АКБ {battery_v:.2f} В — критично")
+        elif not CELL_WARN[0] * cells <= battery_v <= CELL_WARN[1] * cells:
+            add("power", WARN, f"Напряжение АКБ вне нормы: {battery_v:.2f} В")
     if any(v < 0 or v > 65535 for v in light):
         add("light", FAULT, "Датчик света: значение вне диапазона 0…65535")
     elif any(v == 65535 for v in light):
