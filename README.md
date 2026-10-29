@@ -118,5 +118,5 @@ flowchart LR
 - Журналы приложения хранятся в памяти страницы — скачайте лог перед закрытием вкладки.
 
 ## Команда
-
-Заполните: Nauyryz Inzhu/Amanzhol Aisha 10 grade
+Starlight 
+Nauyryz Inzhu/Amanzhol Aisha 10 grade
